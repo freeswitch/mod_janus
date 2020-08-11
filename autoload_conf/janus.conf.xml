@@ -1,0 +1,16 @@
+<configuration name="janus.conf" description="Janus Endpoint">
+  <settings>
+    <param name="debug" value="false"/>
+  </settings>
+
+  <server name="demo">
+    <param name="url" value="https://janus.conf.meetecho.com/janus"/>
+    <!-- <param name="secret" value="the-secret"/> -->
+    <param name="enabled" value="true"/>
+    <param name="rtp-ip" value="$${bind_server_ip}"/>
+    <!-- <param name="apply-candidate-acl" value="localnet.auto"/> -->
+    <!-- <param name="local-network-acl" value="localnet.auto"/> -->
+    <param name="ext-rtp-ip" value="auto-nat"/>
+    <param name="codec-string" value="opus"/>
+  </server>
+</configuration>
