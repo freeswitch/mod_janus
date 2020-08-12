@@ -92,6 +92,8 @@ switch_status_t serversAdd(switch_xml_t xmlint) {
 			pServer->pUrl = switch_core_strdup(globals.pModulePool, pValStr);
 		} else if (!strcmp(pVarStr, "secret") && !zstr(pValStr)) {
 			pServer->pSecret = switch_core_strdup(globals.pModulePool, pValStr);
+		} else if (!strcmp(pVarStr, "auth-token") && !zstr(pValStr)) {
+			pServer->pAuthToken = switch_core_strdup(globals.pModulePool, pValStr);
 		} else if (!strcmp(pVarStr, "local-network-acl") && !zstr(pValStr)) {
       if (strcasecmp(pValStr, "none")) {
 	      pServer->local_network = switch_core_strdup(globals.pModulePool, pValStr);

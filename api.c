@@ -899,7 +899,7 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
   return result;
 }
 
-switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t serverId,
+switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t serverId, const char *pAuthToken,
   switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
   switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
   switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
@@ -924,6 +924,7 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 		result = SWITCH_STATUS_FALSE;
     goto done;
   }
+
 	if (pSecret) {
 		size_t len = strlen(url);
 		if (snprintf(&url[len], sizeof(url) - len, "&apisecret=%s", pSecret) < 0) {
@@ -933,7 +934,16 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 		}
 	}
 
-  DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
+	if (pAuthToken) {
+		size_t len = strlen(url);
+		if (snprintf(&url[len], sizeof(url) - len, "&token=%s", pAuthToken) < 0) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate token\n");
+			result = SWITCH_STATUS_FALSE;
+	    goto done;
+		}
+	}
+
+  DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request - url=%s\n", url);
   //	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
   pJsonResponse = httpGet(url, 0);
 

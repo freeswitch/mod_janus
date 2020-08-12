@@ -46,6 +46,7 @@ typedef struct {
 	char *name;
 	char *pUrl;
 	char *pSecret;
+	char *pAuthToken;
 	switch_thread_t *pThread;
 
   char *local_network;

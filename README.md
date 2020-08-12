@@ -95,6 +95,7 @@ Each server contains the following fields:
 * name - is the internal name given to the server that must be specified in the dial string.
 * url - is the address of the server
 * secret - is the API secret required by Janus (if it has been enabled on the Janus end)
+* auth-token - is the token string string added to the Janus poll request
 * enabled - defines if the server should be brought into service when the module starts.  This state may be modified by the console API.  The default is false.
 * rtp-ip - [see mod_sofia](https://freeswitch.org/confluence/display/FREESWITCH/mod_sofia)
 * ext-rtp-ip - [see mod_sofia](https://freeswitch.org/confluence/display/FREESWITCH/mod_sofia)
@@ -115,6 +116,7 @@ If called with the following dialstring (`{janus-use-existing-room=true}janus/de
   <server name="demo">
     <param name="url" value="https://janus.conf.meetecho.com/janus"/>
     <!-- <param name="secret" value="the-secret"/> -->
+    <!-- <param name="auth-token" value="the-auth-token"/> -->
     <param name="enabled" value="true"/>
     <param name="rtp-ip" value="$${bind_server_ip}"/>
     <!-- <param name="apply-candidate-acl" value="localnet.auto"/> -->
@@ -153,6 +155,7 @@ The following commands are available on the console API:
 ## Notes
 
 TODO: Use websocket rather than long-polling for connection to Janus
+TODO: I am not convinced that the shutdown is always successful
 
 ## Troubleshooting
 

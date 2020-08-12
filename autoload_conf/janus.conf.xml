@@ -6,6 +6,7 @@
   <server name="demo">
     <param name="url" value="https://janus.conf.meetecho.com/janus"/>
     <!-- <param name="secret" value="the-secret"/> -->
+    <!-- <param name="auth-token" value="the-auth-token"/> -->
     <param name="enabled" value="true"/>
     <param name="rtp-ip" value="$${bind_server_ip}"/>
     <!-- <param name="apply-candidate-acl" value="localnet.auto"/> -->
