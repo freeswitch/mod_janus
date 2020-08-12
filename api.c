@@ -560,7 +560,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 
 switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 		const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId,
-		const char *pDisplay, const char *pPin) {
+		const char *pDisplay, const char *pPin, const char *pToken) {
 	message_t request, *pResponse = NULL;
   switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -601,6 +601,7 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 	if (pPin) {
     if (cJSON_AddStringToObject(request.pJsonBody, "pin", pPin) == NULL) {
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.pin)\n");
+			result = SWITCH_STATUS_FALSE;
       goto done;
     }
   }
@@ -608,6 +609,14 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
   if (pDisplay) {
     if (cJSON_AddStringToObject(request.pJsonBody, "display", pDisplay) == NULL) {
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.display)\n");
+			result = SWITCH_STATUS_FALSE;
+      goto done;
+    }
+  }
+
+	if (pToken) {
+    if (cJSON_AddStringToObject(request.pJsonBody, "token", pToken) == NULL) {
+      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.token)\n");
 			result = SWITCH_STATUS_FALSE;
       goto done;
     }

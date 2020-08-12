@@ -131,6 +131,8 @@ The following channel variables are defined:
 * janus-room-record - The value is specified in the *create* request to Janus and indicates that the room mix should be recorded (only applicable if janus-use-existing-room is false).  The default value is not to record.
 * janus-room-record-file - This value specifies the file name to which the recording should be written.  It is passed in the *create* request to Janus (only applicable if janus-use-existing-room is false and  janus-room-record is true).  If omitted the default filename will be used.
 * janus-room-pin - PIN that is used to validate a user entering the room.  This value is used to set the PIN for a created room.
+* janus-user-token - The token for the user that should be passed in the
+*join* request.
 * janus-user-record - Janus should generate a file containing the audio from the user only.  It is specified in the *configure* request.  The default value is not to record.
 * janus-user-record-file - This specifies the base of the filename used when recording the user audio stream.  If omitted the default filename will be used.
 * janus-start-muted - Included in the *confifigure* request to indicate that the user should enter the room muted (no mechanism exists in the module to modify the mute status later).  The default value is that the user should not be muted.
