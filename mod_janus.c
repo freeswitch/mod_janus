@@ -31,40 +31,6 @@
  *
  * Implements interface between FreeSWITCH and Janus audiobridge
  * (https://github.com/meetecho/janus-gateway)
- * Dialstring is of the form "janus/<server name>/<display>@<room>
- * use the channel variable "janus-use-existing-room" if the room is *not*
- * to be created prior to a user joining
- *
- * Channel variables:
- * janus-use-existing-room - if the room is *not* to be created prior to a user joining
- * janus-start-muted - the user should enter the room muted (no mechanism exists
- *   here to modify the mute status later)
- * janus-room-description - description of the room (only applicable if we create the room)
- * janus-room-record - record the room (only applicable if we create the room)
- * janus-room-record-file - the file the room should be recorded to (only applicable if we create the room)
- * janus-user-record - record the user
- * janus-user-record-file - the base filename the user should be recorded to
- *
- * Known issues:
- * 1) When we shutdown there seems to be two Janus endpoints (this not seem to cause
- *    any problems)
- * 2) The shutdown thread waits for the long poll to time out (up to 30s).  Not ideal
- *    but it seems to work
- * 3) valgrind reports a memory leak from switch_thread_create() (although many other
- *    modules exhibit a leak in the same place so I'm inclined to think its a problem
- *    with the core core
- * 4) Only HTTP long polling is supported (websocket connection to Janus are not implemented)
- * 5) This endpoint is audio only.  Non-audio calls will be rejected.
- *
- *
- * For test purposes it is possible to use the Janus demo
- * (https://janus.conf.meetecho.com/audiobridgetest.html) by adding something like
- * this to the dialplan:
- *    <condition field="destination_number" expression="^(\d{11,})$">
- *        <action application="answer" data=""/>
- *        <action application="log" data="INFO Joining Call to Conference"/>
- *        <action application="bridge" data="{janus-use-existing-room=true,janus-start-muted=true}janus/demo/Peter@1234"/>
- *    </condition>
  */
 
 #include	"switch.h"
