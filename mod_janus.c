@@ -455,7 +455,8 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
 						switch_channel_get_variable(channel, "janus-room-derscription"),
 						switch_channel_var_true(channel, "janus-room-record"),
-						switch_channel_get_variable(channel, "janus-room-record-file"))) {
+						switch_channel_get_variable(channel, "janus-room-record-file"),
+						switch_channel_get_variable(channel, "janus-room-pin"))) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create room\n");
 			switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 			return SWITCH_STATUS_FALSE;
@@ -499,7 +500,9 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	if (apiJoin(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId, tech_pvt->pDisplay) != SWITCH_STATUS_SUCCESS) {
+	if (apiJoin(pServer->pUrl, pServer->pSecret, tech_pvt->serverId,
+			tech_pvt->senderId, tech_pvt->roomId, tech_pvt->pDisplay,
+			switch_channel_get_variable(channel, "janus-room-pin")) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to join room\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;

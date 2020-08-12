@@ -426,7 +426,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 
 janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId,
 		const janus_id_t senderId, const janus_id_t roomId, const char *pDescription,
-		switch_bool_t record, const char *pRecordingFile) {
+		switch_bool_t record, const char *pRecordingFile, const char *pPin) {
 	message_t request, *pResponse = NULL;
   janus_id_t result = 0;
 
@@ -467,6 +467,13 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
   if (pDescription) {
     if (cJSON_AddStringToObject(request.pJsonBody, "description", pDescription) == NULL) {
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.description)\n");
+      goto done;
+    }
+  }
+
+	if (pPin) {
+    if (cJSON_AddStringToObject(request.pJsonBody, "pin", pPin) == NULL) {
+      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.pin)\n");
       goto done;
     }
   }
@@ -551,7 +558,9 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
   return result;
 }
 
-switch_status_t apiJoin(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDisplay) {
+switch_status_t apiJoin(const char *pUrl, const char *pSecret,
+		const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId,
+		const char *pDisplay, const char *pPin) {
 	message_t request, *pResponse = NULL;
   switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -587,6 +596,13 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret, const janus_id_t 
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.room)\n");
 		result = SWITCH_STATUS_FALSE;
     goto done;
+  }
+
+	if (pPin) {
+    if (cJSON_AddStringToObject(request.pJsonBody, "pin", pPin) == NULL) {
+      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.pin)\n");
+      goto done;
+    }
   }
 
   if (pDisplay) {
