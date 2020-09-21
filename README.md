@@ -6,6 +6,8 @@ This allows legacy POTS to join the same room as the WebRTC users that are alrea
 
 The module will only support audio calls - video calls will be rejected.  The long polling HTTP interface is used in communication with Janus.  No provision is given to the Websocket interface.
 
+*mod_janus does not currently support trickle-ICE #2.  You may need to run Janus with the `full-trickle` command line flag set.*
+
 ## Table of Contents
 
 * [Table of Contents](#table-of-contents)
