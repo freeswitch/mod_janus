@@ -79,6 +79,10 @@ struct private_object {
 	janus_id_t roomId;
 	char *pDisplay;
 	janus_id_t senderId;
+
+	char *pSdpBody;
+	char *pSdpCandidates;
+	char isTrickleComplete;
 };
 typedef struct private_object private_t;
 
@@ -165,21 +169,10 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 	return SWITCH_STATUS_SUCCESS;
 }
 
-switch_status_t accepted(janus_id_t serverId, janus_id_t senderId, const char *pSdp) {
-	switch_core_session_t *session;
+// called when we have received the body of the SDP and all of the candidates
+switch_status_t proceed(switch_core_session_t *session) {
 	switch_channel_t *channel;
 	private_t *tech_pvt;
-	server_t *pServer;
-
-	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", serverId);
-		return SWITCH_STATUS_NOTFOUND;
-	}
-
-	if (!(session = (switch_core_session_t *) hashFind(&pServer->senderIdLookup, senderId))) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No session for senderId=%" SWITCH_UINT64_T_FMT "\n", senderId);
-		return SWITCH_STATUS_NOTFOUND;
-	}
 
 	channel = switch_core_session_get_channel(session);
 	switch_assert(channel);
@@ -187,9 +180,21 @@ switch_status_t accepted(janus_id_t serverId, janus_id_t senderId, const char *p
 	tech_pvt = switch_core_session_get_private(session);
 	switch_assert(tech_pvt);
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "ACCEPTED sdp=%s\n", pSdp);
+	char sdp[4096] = "";
+	if (tech_pvt->pSdpBody) {
+		(void) strncat(sdp, tech_pvt->pSdpBody, sizeof(sdp) - 1);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "No SDP received\n");
+		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
+		return SWITCH_STATUS_FALSE;
+	}
+	if (tech_pvt->pSdpCandidates) {
+		(void) strncat(sdp, tech_pvt->pSdpCandidates, sizeof(sdp) - 1);
+	}
 
-	if (!switch_core_media_negotiate_sdp(session, pSdp, NULL, SDP_TYPE_RESPONSE)) {
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "ACCEPTED sdp=%s\n", sdp);
+
+	if (!switch_core_media_negotiate_sdp(session, sdp, NULL, SDP_TYPE_RESPONSE)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Cannot negotiate SDP\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
 		return SWITCH_STATUS_FALSE;
@@ -211,6 +216,79 @@ switch_status_t accepted(janus_id_t serverId, janus_id_t senderId, const char *p
 
 
 	return SWITCH_STATUS_SUCCESS;
+}
+
+switch_status_t accepted(janus_id_t serverId, janus_id_t senderId, const char *pSdp) {
+	switch_core_session_t *session;
+	private_t *tech_pvt;
+	server_t *pServer;
+	char isTrickling;
+
+	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", serverId);
+		return SWITCH_STATUS_NOTFOUND;
+	}
+
+	if (!(session = (switch_core_session_t *) hashFind(&pServer->senderIdLookup, senderId))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No session for senderId=%" SWITCH_UINT64_T_FMT "\n", senderId);
+		return SWITCH_STATUS_NOTFOUND;
+	}
+
+	tech_pvt = switch_core_session_get_private(session);
+	switch_assert(tech_pvt);
+
+	tech_pvt->pSdpBody = switch_core_session_strdup(session, pSdp);
+
+	isTrickling = strstr(pSdp, "a=candidate:") == NULL;
+	DEBUG(SWITCH_CHANNEL_LOG, "isTrickling=%d\n", isTrickling);
+
+	if (!isTrickling || tech_pvt->isTrickleComplete) {
+		return proceed(session);
+	} else {
+		return SWITCH_STATUS_SUCCESS;
+	}
+}
+
+switch_status_t trickle(janus_id_t serverId, janus_id_t senderId, const char *pCandidate) {
+	switch_core_session_t *session;
+	server_t *pServer;
+	private_t *tech_pvt;
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "serverId=%" SWITCH_UINT64_T_FMT " candidate=%s\n",
+		serverId, pCandidate);
+
+	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", serverId);
+		return SWITCH_STATUS_NOTFOUND;
+	}
+
+	if (!(session = (switch_core_session_t *) hashFind(&pServer->senderIdLookup, senderId))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No session for senderId=%" SWITCH_UINT64_T_FMT "\n", senderId);
+		return SWITCH_STATUS_NOTFOUND;
+	}
+
+	tech_pvt = switch_core_session_get_private(session);
+	switch_assert(tech_pvt);
+
+	if (switch_strlen_zero(pCandidate)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "serverId=%" SWITCH_UINT64_T_FMT " got all candidates\n", serverId);
+		tech_pvt->isTrickleComplete = SWITCH_TRUE;
+		tech_pvt->pSdpCandidates = switch_core_session_sprintf(session, "%sa=end-of-candidates\r\n",
+			tech_pvt->pSdpCandidates ? tech_pvt->pSdpCandidates : "");
+		if (tech_pvt->pSdpBody) {
+			// we've already for the body - proceed
+			return proceed(session);
+		} else {
+			// wait for the SDP body and then continue
+			return SWITCH_STATUS_SUCCESS;
+		}
+	} else {
+		tech_pvt->pSdpCandidates = switch_core_session_sprintf(session, "%sa=%s\r\n",
+			tech_pvt->pSdpCandidates ? tech_pvt->pSdpCandidates : "", pCandidate);
+
+		DEBUG(SWITCH_CHANNEL_LOG, "candidates=%s\n", tech_pvt->pSdpCandidates);
+		return SWITCH_STATUS_SUCCESS;
+	}
 }
 
 switch_status_t answered(janus_id_t serverId, janus_id_t senderId) {
@@ -326,7 +404,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Poll started\n");
 
-			if (apiPoll(pServer->pUrl, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, answered, hungup) != SWITCH_STATUS_SUCCESS) {
+			if (apiPoll(pServer->pUrl, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, trickle, answered, hungup) != SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Poll failed\n");
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server from hash table\n");
