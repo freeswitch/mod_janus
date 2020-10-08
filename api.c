@@ -43,6 +43,8 @@
 #define JANUS_STRING  "janus"
 #define JANUS_PLUGIN "janus.plugin.audiobridge"
 #define	MAX_POLL_EVENTS 10
+#define HTTP_GET_TIMEOUT 0
+#define HTTP_POST_TIMEOUT 3000
 
 typedef struct {
 	const char *pType;
@@ -53,6 +55,7 @@ typedef struct {
 	const char *pSecret;
 	cJSON *pJsonBody;
 	cJSON *pJsonJsep;
+	const char *pCandidate;
 } message_t;
 
 // calling process must delete the returned value
@@ -124,6 +127,9 @@ static message_t *decode(cJSON *pJsonResponse) {
 	message_t *pMessage;
 	cJSON *pJsonRspPluginData;
 	cJSON *pJsonRspPlugin;
+	cJSON *pJsonRspCandidate;
+	cJSON *pJsonRspCandidateData;
+	cJSON *pJsonRspCandidateCompleted;
 	cJSON *pJsonRspJanus;
 	cJSON *pJsonRspTransaction;
 	cJSON *pJsonRspServerId;
@@ -141,8 +147,7 @@ static message_t *decode(cJSON *pJsonResponse) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid type (data)\n");
 		return NULL;
 	} else if (!pMessage->pJsonBody) {
-		pJsonRspPluginData = cJSON_GetObjectItemCaseSensitive(pJsonResponse, "plugindata");
-		if (pJsonRspPluginData) {
+		if ((pJsonRspPluginData = cJSON_GetObjectItemCaseSensitive(pJsonResponse, "plugindata")) != NULL) {
 			if (cJSON_IsObject(pJsonRspPluginData)) {
 				pJsonRspPlugin = cJSON_GetObjectItemCaseSensitive(pJsonRspPluginData, "plugin");
 			  if (!cJSON_IsString(pJsonRspPlugin) || strcmp(JANUS_PLUGIN, pJsonRspPlugin->valuestring)) {
@@ -157,6 +162,28 @@ static message_t *decode(cJSON *pJsonResponse) {
 			  }
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid type (plugindata)\n");
+				return NULL;
+			}
+		} else if ((pJsonRspCandidate = cJSON_GetObjectItemCaseSensitive(pJsonResponse, "candidate")) != NULL) {
+			if (cJSON_IsObject(pJsonRspCandidate)) {
+				//NB. sdpMLineIndex is ignored - we're only doing audio
+
+				if ((pJsonRspCandidateCompleted = cJSON_GetObjectItemCaseSensitive(pJsonRspCandidate, "completed")) != NULL) {
+				  if (!cJSON_IsBool(pJsonRspCandidateCompleted) || cJSON_IsFalse(pJsonRspCandidateCompleted)) {
+						// assumes that completed is always true value
+				    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (candidate.completed)\n");
+						return NULL;
+				  }
+					pMessage->pCandidate = "";
+				} else if ((pJsonRspCandidateData = cJSON_GetObjectItemCaseSensitive(pJsonRspCandidate, "candidate")) != NULL) {
+					if (!cJSON_IsString(pJsonRspCandidateData)) {
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (candidate.candidate)\n");
+						return NULL;
+					}
+					pMessage->pCandidate = pJsonRspCandidateData->valuestring;
+				}
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid type (candidate)\n");
 				return NULL;
 			}
 		}
@@ -240,7 +267,7 @@ janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
   }
 
   DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(pUrl, 3000, pJsonRequest);
+  pJsonResponse = httpPost(pUrl, HTTP_POST_TIMEOUT, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -304,7 +331,7 @@ switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, 3000, pJsonRequest);
+  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -395,7 +422,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
   //	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
-  pJsonResponse = httpPost(url, 3000, pJsonRequest);
+  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -502,7 +529,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
   //	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
-  pJsonResponse = httpPost(url, 3000, pJsonRequest);
+  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -635,7 +662,7 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, 3000, pJsonRequest);
+  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -753,7 +780,7 @@ switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, 3000, pJsonRequest);
+  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -822,7 +849,7 @@ switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, 3000, pJsonRequest);
+  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -876,7 +903,7 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, 3000, pJsonRequest);
+  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -902,6 +929,7 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
 switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t serverId, const char *pAuthToken,
   switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
   switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
+	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
   switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
   switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason)) {
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
@@ -945,7 +973,7 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 
   DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request - url=%s\n", url);
   //	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
-  pJsonResponse = httpGet(url, 0);
+  pJsonResponse = httpGet(url, HTTP_GET_TIMEOUT);
 
   if (pJsonResponse == NULL) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -990,6 +1018,12 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 			}
 		} else if (!strcmp(pResponse->pType, "media")) {
 			DEBUG(SWITCH_CHANNEL_LOG, "Media is flowing\n");
+		} else if (!strcmp(pResponse->pType, "trickle")) {
+			DEBUG(SWITCH_CHANNEL_LOG, "Receieved a candidate\n");
+
+			if ((*pTrickleFunc)(pResponse->serverId, pResponse->senderId, pResponse->pCandidate)) {
+			 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't add candidate\n");
+			}
 		} else if (!strcmp(pResponse->pType, "event")) {
 			  pJsonRspType = cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "audiobridge");
 			  if (!cJSON_IsString(pJsonRspType)) {
