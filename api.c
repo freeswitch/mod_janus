@@ -118,7 +118,7 @@ static ks_json_t *encode(const message_t message) {
 	return pJsonRequest;
 
 	error:
-	ks_json_delete(pJsonRequest);
+	ks_json_delete(&pJsonRequest);
 	return NULL;
 }
 
@@ -289,8 +289,8 @@ janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
   serverId = (janus_id_t) pJsonRspId->valuedouble;
 
   done:
-  ks_json_delete(pJsonRequest);
-  ks_json_delete(pJsonResponse);
+  ks_json_delete(&pJsonRequest);
+  ks_json_delete(&pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
 
@@ -381,8 +381,8 @@ switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id
 	}
 
   done:
-  ks_json_delete(pJsonRequest);
-  ks_json_delete(pJsonResponse);
+  ks_json_delete(&pJsonRequest);
+  ks_json_delete(&pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
 
@@ -443,8 +443,8 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
   senderId = (janus_id_t) pJsonRspId->valuedouble;
 
   done:
-  ks_json_delete(pJsonRequest);
-  ks_json_delete(pJsonResponse);
+  ks_json_delete(&pJsonRequest);
+  ks_json_delete(&pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
 
@@ -582,8 +582,8 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 	}
 
   done:
-  ks_json_delete(pJsonRequest);
-  ks_json_delete(pJsonResponse);
+  ks_json_delete(&pJsonRequest);
+  ks_json_delete(&pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
 
@@ -683,8 +683,8 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 	}
 
   done:
-  ks_json_delete(pJsonRequest);
-  ks_json_delete(pJsonResponse);
+  ks_json_delete(&pJsonRequest);
+  ks_json_delete(&pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
 
@@ -801,8 +801,8 @@ switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
 	}
 
   done:
-  ks_json_delete(pJsonRequest);
-  ks_json_delete(pJsonResponse);
+  ks_json_delete(&pJsonRequest);
+  ks_json_delete(&pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
 
@@ -870,8 +870,8 @@ switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t
 	}
 
 	done:
-	ks_json_delete(pJsonRequest);
-  ks_json_delete(pJsonResponse);
+	ks_json_delete(&pJsonRequest);
+  ks_json_delete(&pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
 
@@ -923,8 +923,8 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
 	}
 
   done:
-  ks_json_delete(pJsonRequest);
-  ks_json_delete(pJsonResponse);
+  ks_json_delete(&pJsonRequest);
+  ks_json_delete(&pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
 
@@ -1114,7 +1114,7 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
   }
 
 	done:
-	ks_json_delete(pJsonResponse);
+	ks_json_delete(&pJsonResponse);
 
   return result;
 }
