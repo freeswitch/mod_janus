@@ -30,7 +30,8 @@
  * http.c -- HTTP functions for janus endpoint module
  *
  */
-#include  "cJSON.h"
+#include  "libks/ks.h"
+#include  "libks/ks_json.h"
 #include  "switch.h"
 #include  "switch_curl.h"
 
@@ -45,9 +46,9 @@ static size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdat
   return nmemb;
 }
 
-cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonRequest)
+ks_json_t *httpPost(const char *pUrl, const unsigned int timeout, ks_json_t *pJsonRequest)
 {
-  cJSON *pJsonResponse = NULL;
+  ks_json_t *pJsonResponse = NULL;
   switch_CURL *curl_handle = NULL;
   switch_CURLcode curl_status = CURLE_UNKNOWN_OPTION;
   long httpRes = 0;
@@ -71,7 +72,7 @@ cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonReques
 
   switch_curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
   switch_curl_easy_setopt(curl_handle, CURLOPT_URL, pUrl);
-  pJsonStr = cJSON_PrintUnformatted(pJsonRequest);
+  pJsonStr = ks_json_print_unformatted(pJsonRequest);
   switch_curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, pJsonStr);
   switch_curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "freeswitch-janus/1.0");
   switch_curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_callback);
@@ -94,23 +95,23 @@ cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonReques
 
     DEBUG(SWITCH_CHANNEL_LOG, "result=%s\n", pBodyStr);
 
-    pJsonResponse = cJSON_Parse(pBodyStr);
+    pJsonResponse = ks_json_parse(pBodyStr);
   } else {
     // nothing downloaded or download interrupted
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Received curl error %d HTTP error code %ld trying to fetch %s\n", curl_status, httpRes, pUrl);
   }
 
   switch_curl_easy_cleanup(curl_handle);
-  switch_safe_free(pJsonStr);
+  ks_free(pJsonStr);
   switch_buffer_destroy(&pBody);
   switch_curl_slist_free_all(headers);
 
   return pJsonResponse;
 }
 
-cJSON *httpGet(const char *pUrl, const unsigned int timeout)
+ks_json_t *httpGet(const char *pUrl, const unsigned int timeout)
 {
-  cJSON *pJsonResponse = NULL;
+  ks_json_t *pJsonResponse = NULL;
   switch_CURL *curl_handle = NULL;
 	switch_CURLcode curl_status = CURLE_UNKNOWN_OPTION;
   long httpRes = 0;
@@ -153,7 +154,7 @@ cJSON *httpGet(const char *pUrl, const unsigned int timeout)
 
     DEBUG(SWITCH_CHANNEL_LOG, "code=%ld result=%s\n", httpRes, pBodyStr);
 
-    pJsonResponse = cJSON_Parse(pBodyStr);
+    pJsonResponse = ks_json_parse(pBodyStr);
   } else {
     // nothing downloaded or download interrupted
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Received curl error %d HTTP error code %ld trying to fetch %s\n", curl_status, httpRes, pUrl);

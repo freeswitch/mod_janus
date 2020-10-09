@@ -33,10 +33,11 @@
 #ifndef _HTTP_H_
 #define _HTTP_H_
 
-#include  "cJSON.h"
+#include  "libks/ks.h"
+#include  "libks/ks_json.h"
 
-cJSON *httpPost(const char *url, const unsigned int timeout, cJSON *pJsonRequest);
-cJSON *httpGet(const char *url, const unsigned int timeout);
+ks_json_t *httpPost(const char *url, const unsigned int timeout, ks_json_t *pJsonRequest);
+ks_json_t *httpGet(const char *url, const unsigned int timeout);
 
 #endif //_HTTP_H_
 /* For Emacs:
