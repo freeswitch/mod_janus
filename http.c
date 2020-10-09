@@ -102,7 +102,7 @@ ks_json_t *httpPost(const char *pUrl, const unsigned int timeout, ks_json_t *pJs
   }
 
   switch_curl_easy_cleanup(curl_handle);
-  switch_safe_free(pJsonStr);
+  ks_free(pJsonStr);
   switch_buffer_destroy(&pBody);
   switch_curl_slist_free_all(headers);
 
