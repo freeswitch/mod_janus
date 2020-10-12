@@ -27,19 +27,43 @@
  * Richard Screene <richard.screene@thisisdrum.com>
  *
  *
- * http.h -- HTTP headers for janus endpoint module
+ * api.h -- API header for janus endpoint module
  *
  */
-#ifndef _HTTP_H_
-#define _HTTP_H_
+#ifndef	_TRANSPORT_H_
+#define	_TRANSPORT_H_
 
 #include  "libks/ks.h"
 #include  "libks/ks_json.h"
+#include  "globals.h"
 
-ks_json_t *httpPost(const char *url, ks_json_t *pJsonRequest);
-ks_json_t *httpGet(const char *url);
+typedef enum {
+	TRANSPORT_TYPE_NONE,
+	TRANSPORT_TYPE_HTTP,
+	TRANSPORT_TYPE_WS
+} transport_types_t;
 
-#endif //_HTTP_H_
+typedef struct {
+	char *pUrl;
+	char *pSecret;
+	transport_types_t type;
+
+	// requests
+	ks_json_t *(*pSend)(const char *url, ks_json_t *pJsonRequest);
+	ks_json_t *(*pPoll)(const char *url);	// HTTP-only
+
+	// callbacks
+	switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId);
+	switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp);
+	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate);
+	switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId);
+	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason);
+
+
+} transport_t;
+
+
+#endif //_TRANSPORT_H_
 /* For Emacs:
  * Local Variables:
  * mode:c

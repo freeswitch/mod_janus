@@ -35,6 +35,7 @@
 
 #include	"switch.h"
 #include	"hash.h"
+#include	"transport.h"
 
 typedef enum {
 	SFLAG_ENABLED        = (1 << 0),
@@ -66,6 +67,8 @@ typedef struct {
 
   hash_t senderIdLookup;
 
+	transport_t transport;
+	
   // values that may be changed go under here - the static values
   // above are only modified during initialisation and so we
   // not mutexed

@@ -157,7 +157,7 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Generated SDP=%s\n", tech_pvt->mparams.local_sdp_str);
 
-	if (apiConfigure(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId,
+	if (apiConfigure(&pServer->transport, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId,
 					switch_channel_var_true(channel, "janus-start-muted"),
 					switch_channel_var_true(channel, "janus-user-record"),
 					switch_channel_get_variable(channel, "janus-user-record-file"),
@@ -356,7 +356,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 
 		if (serverId) {
 			// the connection or Janus has restarted - try to re-use the same serverId
-			switch_status_t status =  apiClaimServerId(pServer->pUrl, pServer->pSecret, serverId);
+			switch_status_t status =  apiClaimServerId(&pServer->transport, pServer->pSecret, serverId);
 			if (status == SWITCH_STATUS_SOCKERR) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s claim socket error - retry later\n", pServer->name);
 			} else if (status == SWITCH_STATUS_SUCCESS) {
@@ -387,7 +387,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 			}
 		} else {
 			// first time
-			serverId = apiGetServerId(pServer->pUrl, pServer->pSecret);
+			serverId = apiGetServerId(&pServer->transport, pServer->pSecret);
 			if (!serverId) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Error getting serverId\n");
 			} else if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
@@ -404,7 +404,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Poll started\n");
 
-			if (apiPoll(pServer->pUrl, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, trickle, answered, hungup) != SWITCH_STATUS_SUCCESS) {
+			if (apiPoll(&pServer->transport, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, trickle, answered, hungup) != SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Poll failed\n");
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server from hash table\n");
@@ -516,7 +516,7 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	tech_pvt->senderId = apiGetSenderId(pServer->pUrl, pServer->pSecret, tech_pvt->serverId);
+	tech_pvt->senderId = apiGetSenderId(&pServer->transport, pServer->pSecret, tech_pvt->serverId);
 	if (!tech_pvt->senderId) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error getting senderId\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
@@ -530,7 +530,7 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	}
 
 	if (switch_channel_var_false(channel, "janus-use-existing-room")) {
-		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
+		if (!apiCreateRoom(&pServer->transport, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
 						switch_channel_get_variable(channel, "janus-room-description"),
 						switch_channel_var_true(channel, "janus-room-record"),
 						switch_channel_get_variable(channel, "janus-room-record-file"),
@@ -578,7 +578,7 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	if (apiJoin(pServer->pUrl, pServer->pSecret, tech_pvt->serverId,
+	if (apiJoin(&pServer->transport, pServer->pSecret, tech_pvt->serverId,
 			tech_pvt->senderId, tech_pvt->roomId, tech_pvt->pDisplay,
 			switch_channel_get_variable(channel, "janus-room-pin"),
 			switch_channel_get_variable(channel, "janus-user-token")) != SWITCH_STATUS_SUCCESS) {
@@ -668,12 +668,12 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	if (apiLeave(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
+	if (apiLeave(&pServer->transport, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to leave room\n");
 		// carry on regardless
 	}
 
-	if (apiDetach(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
+	if (apiDetach(&pServer->transport, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to detach\n");
 		// carry on regardless
 	}
@@ -1143,6 +1143,22 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_janus_load)
 	}
 
 	while ((pServer = serversIterate(&pIndex))) {
+		// initialise the transport
+
+		//if startsWith (HTTP)
+		pServer->transport.pUrl = pServer->pUrl;
+		pServer->transport.pSecret = pServer->pSecret;
+		pServer->transport.type = TRANSPORT_TYPE_HTTP;
+
+		pServer->transport.pSend = httpPost;
+		pServer->transport.pPoll = httpGet;
+
+		pServer->transport.pJoinedFunc = joined;
+		pServer->transport.pAcceptedFunc = accepted;
+		pServer->transport.pTrickleFunc = trickle;
+		pServer->transport.pAnsweredFunc = answered;
+		pServer->transport.pHungupFunc = hungup;
+
 		if (switch_test_flag(pServer, SFLAG_ENABLED)) {
 			startServerThread(pServer, SWITCH_TRUE);
 		}

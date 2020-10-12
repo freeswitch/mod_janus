@@ -37,14 +37,13 @@
 // use switch_stun_random_string() to get a transactionId
 #include  "switch_stun.h"
 #include  "globals.h"
+#include  "transport.h"
 #include  "http.h"
 
 #define TRANSACTION_ID_LENGTH 16
 #define JANUS_STRING  "janus"
 #define JANUS_PLUGIN "janus.plugin.audiobridge"
 #define	MAX_POLL_EVENTS 10
-#define HTTP_GET_TIMEOUT 0
-#define HTTP_POST_TIMEOUT 3000
 
 typedef struct {
 	const char *pType;
@@ -243,7 +242,7 @@ static message_t *decode(ks_json_t *pJsonResponse) {
 }
 
 
-janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
+janus_id_t apiGetServerId(transport_t *pTransport) {
   janus_id_t serverId = 0;
 	message_t request, *pResponse = NULL;
 
@@ -252,14 +251,14 @@ janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
 	ks_json_t *pJsonRspId;
   char *pTransactionId = generateTransactionId();
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
   //"{\"janus\":\"create\",\"transaction\":\"5Y1VuEbeNf7U\",\"apisecret\":\"API-SECRET\"}";
 
 	(void) memset((void *) &request, 0, sizeof(request));
 	request.pType = "create";
 	request.pTransactionId = pTransactionId;
-	request.pSecret = pSecret;
+	request.pSecret = pTransport->pSecret;
 
   if (!(pJsonRequest = encode(request))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create request\n");
@@ -267,7 +266,7 @@ janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
   }
 
   DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(pUrl, HTTP_POST_TIMEOUT, pJsonRequest);
+  pJsonResponse = pTransport->pSend(pTransport->pUrl, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -297,7 +296,7 @@ janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
   return serverId;
 }
 
-switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id_t serverId) {
+switch_status_t apiClaimServerId(transport_t *pTransport, janus_id_t serverId) {
 	message_t request, *pResponse = NULL;
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -309,14 +308,14 @@ switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id
 	char *pTransactionId = generateTransactionId();
 	char url[1024];
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
   //"{\"janus\":\"claim\",\"transaction\":\"5Y1VuEbeNf7U\",\"apisecret\":\"API-SECRET\",\"session_id\":999999}";
 
 	(void) memset((void *) &request, 0, sizeof(request));
 	request.pType = "claim";
 	request.pTransactionId = pTransactionId;
-	request.pSecret = pSecret;
+	request.pSecret = pTransport->pSecret;
 
   if (!(pJsonRequest = encode(request))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create request\n");
@@ -324,14 +323,14 @@ switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id
     goto done;
   }
 
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT, pUrl, serverId) < 0) {
+	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT, pTransport->pUrl, serverId) < 0) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
 		result = SWITCH_STATUS_FALSE;
     goto done;
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+  pJsonResponse = pTransport->pSend(url, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -389,7 +388,7 @@ switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id
   return result;
 }
 
-janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_t serverId) {
+janus_id_t apiGetSenderId(transport_t *pTransport, const janus_id_t serverId) {
 	message_t request, *pResponse = NULL;
   janus_id_t senderId = 0;
 
@@ -399,7 +398,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 	char *pTransactionId = generateTransactionId();
   char url[1024];
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
   // {"janus":"attach","plugin":"janus.plugin.audiobridge","opaque_id":"audiobridgetest-QsFKsttqnbOx","transaction":"ScRdYl6r0qoX"}
 
@@ -407,7 +406,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 	request.pType = "attach";
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
-	request.pSecret = pSecret;
+	request.pSecret = pTransport->pSecret;
 	request.isPlugin = SWITCH_TRUE;
 
 	if (!(pJsonRequest = encode(request))) {
@@ -415,14 +414,14 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
     goto done;
   }
 
-  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT, pUrl, serverId) < 0) {
+  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT, pTransport->pUrl, serverId) < 0) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
     goto done;
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
   //	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
-  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+  pJsonResponse = pTransport->pSend(url, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -451,7 +450,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
   return senderId;
 }
 
-janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId,
+janus_id_t apiCreateRoom(transport_t *pTransport, const janus_id_t serverId,
 		const janus_id_t senderId, const janus_id_t roomId, const char *pDescription,
 		switch_bool_t record, const char *pRecordingFile, const char *pPin) {
 	message_t request, *pResponse = NULL;
@@ -465,7 +464,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 	char *pTransactionId = generateTransactionId();
   char url[1024];
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
   //"{\"janus\":\"message\",\"transaction\":\"%s\",\"apisecret\":\"%s\",\"body\":{\"request\":\"join\",\"room\":%lu,\"display\":\"%s\"}}",
 
@@ -473,7 +472,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 	request.pType = "message";
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
-	request.pSecret = pSecret;
+	request.pSecret = pTransport->pSecret;
 
 	request.pJsonBody = ks_json_create_object();
   if (request.pJsonBody == NULL) {
@@ -522,14 +521,14 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
     goto done;
   }
 
-  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pUrl, serverId, senderId) < 0) {
+  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pTransport->pUrl, serverId, senderId) < 0) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
     goto done;
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
   //	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
-  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+  pJsonResponse = pTransport->pSend(url, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -585,7 +584,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
   return result;
 }
 
-switch_status_t apiJoin(const char *pUrl, const char *pSecret,
+switch_status_t apiJoin(transport_t *pTransport,
 		const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId,
 		const char *pDisplay, const char *pPin, const char *pToken) {
 	message_t request, *pResponse = NULL;
@@ -596,7 +595,7 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 	char *pTransactionId = generateTransactionId();
   char url[1024];
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
   //"{\"janus\":\"message\",\"transaction\":\"%s\",\"apisecret\":\"%s\",\"body\":{\"request\":\"join\",\"room\":%lu,\"display\":\"%s\"}}",
 
@@ -604,7 +603,7 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 	request.pType = "message";
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
-	request.pSecret = pSecret;
+	request.pSecret = pTransport->pSecret;
 
 	request.pJsonBody = ks_json_create_object();
   if (request.pJsonBody == NULL) {
@@ -655,14 +654,14 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
     goto done;
   }
 
-  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pUrl, serverId, senderId) < 0) {
+  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pTransport->pUrl, serverId, senderId) < 0) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
 		result = SWITCH_STATUS_FALSE;
     goto done;
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+  pJsonResponse = pTransport->pSend(url, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -686,7 +685,7 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
   return result;
 }
 
-switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
+switch_status_t apiConfigure(transport_t *pTransport,
 		const janus_id_t serverId, const janus_id_t senderId, const switch_bool_t muted,
 		switch_bool_t record, const char *pRecordingFile,
 		const char *pType, const char *pSdp) {
@@ -698,7 +697,7 @@ switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
 	char *pTransactionId = generateTransactionId();
   char url[1024];
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
 	//{"janus":"message","body":{"request":"configure","muted":false},"transaction":"QPDt2vYOQmmd","jsep":{"type":"offer","sdp":"..."}}
 
@@ -706,7 +705,7 @@ switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
 	request.pType = "message";
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
-	request.pSecret = pSecret;
+	request.pSecret = pTransport->pSecret;
 
 	request.pJsonBody = ks_json_create_object();
   if (request.pJsonBody == NULL) {
@@ -773,14 +772,14 @@ switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
     goto done;
   }
 
-  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pUrl, serverId, senderId) < 0) {
+  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pTransport->pUrl, serverId, senderId) < 0) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
 		result = SWITCH_STATUS_FALSE;
     goto done;
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+  pJsonResponse = pTransport->pSend(url, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -804,7 +803,7 @@ switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
   return result;
 }
 
-switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId) {
+switch_status_t apiLeave(transport_t *pTransport, const janus_id_t serverId, const janus_id_t senderId) {
 	message_t request, *pResponse = NULL;
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -813,7 +812,7 @@ switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t
 	char *pTransactionId = generateTransactionId();
   char url[1024];
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
 	//{"janus":"message","body":{"request":"leave"},"transaction":"QPDt2vYOQmmd"}
 
@@ -821,7 +820,7 @@ switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t
 	request.pType = "message";
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
-	request.pSecret = pSecret;
+	request.pSecret = pTransport->pSecret;
 
 	request.pJsonBody = ks_json_create_object();
   if (request.pJsonBody == NULL) {
@@ -842,14 +841,14 @@ switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t
     goto done;
   }
 
-  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pUrl, serverId, senderId) < 0) {
+  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pTransport->pUrl, serverId, senderId) < 0) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
 		result = SWITCH_STATUS_FALSE;
     goto done;
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+  pJsonResponse = pTransport->pSend(url, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -873,7 +872,7 @@ switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t
 	return result;
 }
 
-switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId) {
+switch_status_t apiDetach(transport_t *pTransport, const janus_id_t serverId, const janus_id_t senderId) {
 	message_t request, *pResponse = NULL;
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -882,13 +881,13 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
 	char *pTransactionId = generateTransactionId();
   char url[1024];
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
 	(void) memset((void *) &request, 0, sizeof(request));
 	request.pType = "detach";
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
-	request.pSecret = pSecret;
+	request.pSecret = pTransport->pSecret;
 
 	if (!(pJsonRequest = encode(request))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create request\n");
@@ -896,14 +895,14 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
     goto done;
   }
 
-  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pUrl, serverId, senderId) < 0) {
+  if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pTransport->pUrl, serverId, senderId) < 0) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
 		result = SWITCH_STATUS_FALSE;
     goto done;
   }
 
 	DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+  pJsonResponse = pTransport->pSend(url, pJsonRequest);
 
 	if (!(pResponse = decode(pJsonResponse))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -926,7 +925,7 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
   return result;
 }
 
-switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t serverId, const char *pAuthToken,
+switch_status_t apiPoll(transport_t *pTransport, const janus_id_t serverId, const char *pAuthToken,
   switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
   switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
@@ -945,17 +944,17 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 
   char url[1024];
 
-	switch_assert(pUrl);
+	switch_assert(pTransport->pUrl);
 
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "?maxev=%d", pUrl, serverId, MAX_POLL_EVENTS) < 0) {
+	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "?maxev=%d", pTransport->pUrl, serverId, MAX_POLL_EVENTS) < 0) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
 		result = SWITCH_STATUS_FALSE;
     goto done;
   }
 
-	if (pSecret) {
+	if (pTransport->pSecret) {
 		size_t len = strlen(url);
-		if (snprintf(&url[len], sizeof(url) - len, "&apisecret=%s", pSecret) < 0) {
+		if (snprintf(&url[len], sizeof(url) - len, "&apisecret=%s", pTransport->pSecret) < 0) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate secret\n");
 			result = SWITCH_STATUS_FALSE;
 	    goto done;
@@ -973,7 +972,7 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 
   DEBUG(SWITCH_CHANNEL_LOG, "Sending HTTP request - url=%s\n", url);
   //	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
-  pJsonResponse = httpGet(url, HTTP_GET_TIMEOUT);
+  pJsonResponse = pTransport->pPoll(url);
 
   if (pJsonResponse == NULL) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");

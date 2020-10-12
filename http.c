@@ -40,13 +40,16 @@
 
 #define INITIAL_BODY_SIZE 1000
 
+#define HTTP_TIMEOUT_NONE     0
+#define HTTP_TIMEOUT_DEFAULT  3000
+
 static size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
   switch_buffer_t *pBuffer = (switch_buffer_t *) userdata;
   switch_buffer_write(pBuffer, ptr, size * nmemb);
   return nmemb;
 }
 
-ks_json_t *httpPost(const char *pUrl, const unsigned int timeout, ks_json_t *pJsonRequest)
+ks_json_t *httpPost(const char *pUrl, ks_json_t *pJsonRequest)
 {
   ks_json_t *pJsonResponse = NULL;
   switch_CURL *curl_handle = NULL;
@@ -56,6 +59,7 @@ ks_json_t *httpPost(const char *pUrl, const unsigned int timeout, ks_json_t *pJs
   char *pJsonStr = NULL;
   switch_buffer_t *pBody = NULL;
   const char *pBodyStr;
+  unsigned int timeout = HTTP_TIMEOUT_DEFAULT;
 
   switch_assert(pUrl);
 
@@ -109,7 +113,7 @@ ks_json_t *httpPost(const char *pUrl, const unsigned int timeout, ks_json_t *pJs
   return pJsonResponse;
 }
 
-ks_json_t *httpGet(const char *pUrl, const unsigned int timeout)
+ks_json_t *httpGet(const char *pUrl)
 {
   ks_json_t *pJsonResponse = NULL;
   switch_CURL *curl_handle = NULL;
@@ -118,6 +122,7 @@ ks_json_t *httpGet(const char *pUrl, const unsigned int timeout)
   switch_curl_slist_t *headers = NULL;
   switch_buffer_t *pBody = NULL;
   const char *pBodyStr;
+  unsigned int timeout = HTTP_TIMEOUT_NONE;
 
   switch_assert(pUrl);
 
