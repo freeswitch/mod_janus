@@ -34,24 +34,32 @@
 #define	_API_H_
 
 #include  "globals.h"
+#include  "servers.h"
 
-janus_id_t apiGetServerId(transport_t *pTransport, const char *pSecret);
-switch_status_t apiClaimServerId(transport_t *pTransport, const char *pSecret, const janus_id_t serverId);
-janus_id_t apiGetSenderId(transport_t *pTransport, const char *pSecret, const janus_id_t serverId);
-janus_id_t apiCreateRoom(transport_t *pTransport, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDescription, switch_bool_t record, const char *pRecordingFile, const char *pPin);
-switch_status_t apiJoin(transport_t *pTransport, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDisplay, const char *pPin, const char *pToken);
-switch_status_t apiConfigure(transport_t *pTransport, const char *pSecret,
+void *SWITCH_THREAD_FUNC apiThread(switch_thread_t *pThread, void *pObj);
+
+
+janus_id_t apiGetServerId(server_t *pServer, const char *pSecret);
+switch_status_t apiClaimServerId(server_t *pServer, const char *pSecret, const janus_id_t serverId);
+janus_id_t apiGetSenderId(server_t *pServer, const char *pSecret, const janus_id_t serverId);
+janus_id_t apiCreateRoom(server_t *pServer, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDescription, switch_bool_t record, const char *pRecordingFile, const char *pPin);
+switch_status_t apiJoin(server_t *pServer, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDisplay, const char *pPin, const char *pToken);
+switch_status_t apiConfigure(server_t *pServer, const char *pSecret,
 		const janus_id_t serverId, const janus_id_t senderId, const switch_bool_t muted,
 		switch_bool_t record, const char *pRecordingFile,
 		const char *pType, const char *pSdp);
-switch_status_t apiLeave(transport_t *pTransport, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId);
-switch_status_t apiDetach(transport_t *pTransport, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId);
-switch_status_t apiPoll(transport_t *pTransport, const char *pSecret, const janus_id_t serverId, const char *pAuthToken,
+switch_status_t apiLeave(server_t *pServer, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId);
+switch_status_t apiDetach(server_t *pServer, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId);
+switch_status_t apiPoll(server_t *pServer, const char *pSecret, const janus_id_t serverId, const char *pAuthToken,
   switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
   switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
   switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
   switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason));
+
+
+void smRun(server_t *pServer, api_events_t event, void *pObj);
+
 
 #endif //_API_H_
 /* For Emacs:

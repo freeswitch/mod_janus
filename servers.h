@@ -36,6 +36,7 @@
 #include	"switch.h"
 #include	"hash.h"
 #include	"transport.h"
+#include	"servers_struct.h"
 
 typedef enum {
 	SFLAG_ENABLED        = (1 << 0),
@@ -43,41 +44,7 @@ typedef enum {
 	SFLAG_AUTO_NAT       = (1 << 2)
 } SFLAGS;
 
-typedef struct {
-	char *name;
-	char *pUrl;
-	char *pSecret;
-	char *pAuthToken;
-	switch_thread_t *pThread;
-
-  char *local_network;
-	char *extrtpip;
-
-	char *cand_acl[SWITCH_MAX_CAND_ACL];
-	uint32_t cand_acl_count;
-
-	char *rtpip;
-	char *rtpip6;
-	char *codec_string;
-
-	switch_mutex_t *flag_mutex;
-  unsigned int flags;
-
-  switch_mutex_t *mutex;
-
-  hash_t senderIdLookup;
-
-	transport_t transport;
-	
-  // values that may be changed go under here - the static values
-  // above are only modified during initialisation and so we
-  // not mutexed
-  janus_id_t serverId;
-	switch_time_t started;
-  unsigned int totalCalls;
-  unsigned int callsInProgress;
-
-} server_t;
+typedef struct server server_t;
 
 switch_status_t serversList(const char *pLine, const char *pCursor, switch_console_callback_match_t **matches);
 switch_status_t serversAdd(switch_xml_t xmlint);

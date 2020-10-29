@@ -36,6 +36,8 @@
 #include  "libks/ks.h"
 #include  "libks/ks_json.h"
 #include  "globals.h"
+//#include  "http.h"
+#include  "http_struct.h"
 
 typedef enum {
 	TRANSPORT_TYPE_NONE,
@@ -43,14 +45,19 @@ typedef enum {
 	TRANSPORT_TYPE_WS
 } transport_types_t;
 
+//TODO - can we do this better???
+//struct server;
+typedef struct server server_t;
+
 typedef struct {
+	api_states_t state;
 	char *pUrl;
 	char *pSecret;
 	transport_types_t type;
 
 	// requests
-	ks_json_t *(*pSend)(const char *url, ks_json_t *pJsonRequest);
-	ks_json_t *(*pPoll)(const char *url);	// HTTP-only
+	ks_json_t *(*pSend)(server_t *pServer, const char *url, ks_json_t *pJsonRequest);
+	ks_json_t *(*pPoll)(server_t *pServer, const char *url);	// HTTP-only
 
 	// callbacks
 	switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId);
@@ -59,6 +66,8 @@ typedef struct {
 	switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId);
 	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason);
 
+	//TODO - union with ws
+	http_t http;
 
 } transport_t;
 

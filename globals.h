@@ -64,6 +64,24 @@ typedef struct {
 
 extern globals_t globals;
 
+
+//TODO - move me....
+typedef enum {
+	API_EVENT_START,
+	API_EVENT_ACK,
+	API_EVENT_ERROR,
+	API_EVENT_MESSAGE,
+	API_EVENT_MAX	// keep at end
+} api_events_t;
+
+typedef enum {
+	API_STATE_IDLE,
+	API_STATE_CLAIMING,
+	API_STATE_CREATING,
+	API_STATE_ACTIVE,
+	API_STATE_MAX	// keep at end
+} api_states_t;
+
 #endif //_GLOBALS_H_
 /* For Emacs:
  * Local Variables:

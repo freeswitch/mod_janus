@@ -33,11 +33,15 @@
 #ifndef _HTTP_H_
 #define _HTTP_H_
 
+//TODO - no JSON
 #include  "libks/ks.h"
 #include  "libks/ks_json.h"
+#include  "servers.h"
 
-ks_json_t *httpPost(const char *url, ks_json_t *pJsonRequest);
-ks_json_t *httpGet(const char *url);
+
+ks_json_t *httpPost(server_t *pServer, const char *url, ks_json_t *pJsonRequest);
+ks_json_t *httpGet(server_t *pServer, const char *url);
+void *SWITCH_THREAD_FUNC httpThread(switch_thread_t *pThread, void *pObj);
 
 #endif //_HTTP_H_
 /* For Emacs:
