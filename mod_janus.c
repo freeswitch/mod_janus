@@ -171,6 +171,8 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 
 // called when we have received the body of the SDP and all of the candidates
 switch_status_t proceed(switch_core_session_t *session) {
+	char sdp[4096] = "";
+
 	switch_channel_t *channel;
 	private_t *tech_pvt;
 
@@ -180,7 +182,6 @@ switch_status_t proceed(switch_core_session_t *session) {
 	tech_pvt = switch_core_session_get_private(session);
 	switch_assert(tech_pvt);
 
-	char sdp[4096] = "";
 	if (tech_pvt->pSdpBody) {
 		(void) strncat(sdp, tech_pvt->pSdpBody, sizeof(sdp) - 1);
 	} else {
