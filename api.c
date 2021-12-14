@@ -453,7 +453,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 
 janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId,
 		const janus_id_t senderId, const janus_id_t roomId, const char *pDescription,
-		switch_bool_t record, const char *pRecordingFile, const char *pPin) {
+		switch_bool_t record, const char *pRecordingFile, const char *pPin, switch_bool_t pAudioLevelEvent) {
 	message_t request, *pResponse = NULL;
   janus_id_t result = 0;
 
@@ -503,6 +503,11 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
       switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.pin)\n");
       goto done;
     }
+  }
+
+  if (cJSON_AddBoolToObject(request.pJsonBody, "audiolevel_event", (cJSON_bool) pAudioLevelEvent) == NULL) {
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create boolean (body.audiolevel_event)\n");
+	goto done;
   }
 
   if (cJSON_AddBoolToObject(request.pJsonBody, "record", (cJSON_bool) record) == NULL) {

@@ -38,7 +38,7 @@
 janus_id_t apiGetServerId(const char *pUrl, const char *pSecret);
 switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, const janus_id_t serverId);
 janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_t serverId);
-janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDescription, switch_bool_t record, const char *pRecordingFile, const char *pPin);
+janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDescription, switch_bool_t record, const char *pRecordingFile, const char *pPin, switch_bool_t pAudioLevelEvent);
 switch_status_t apiJoin(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDisplay, const char *pPin, const char *pToken);
 switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
 		const janus_id_t serverId, const janus_id_t senderId, const switch_bool_t muted,
