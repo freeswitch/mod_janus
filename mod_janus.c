@@ -42,6 +42,10 @@
 #include	"api.h"
 #include	"hash.h"
 
+#ifndef JANUS_CONFIG_FILE
+#define JANUS_CONFIG_FILE "janus.conf"
+#endif
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_janus_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown);
 //SWITCH_MODULE_RUNTIME_FUNCTION(mod_janus_runtime);
@@ -1057,7 +1061,7 @@ switch_io_routines_t janus_io_routines = {
 
 static switch_status_t load_config(void)
 {
-	char *cf = "janus.conf";
+	char *cf = JANUS_CONFIG_FILE;
 	switch_xml_t cfg, xml, settings, param, xmlint;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Janus - loading config\n");
