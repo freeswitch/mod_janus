@@ -46,6 +46,9 @@
 #define JANUS_CONFIG_FILE "janus.conf"
 #endif
 
+#define JANUS_AUDIO_PLUGIN "janus.plugin.audiobridge"
+#define JANUS_VIDEO_PLUGIN "janus.plugin.videoroom"
+
 SWITCH_MODULE_LOAD_FUNCTION(mod_janus_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown);
 //SWITCH_MODULE_RUNTIME_FUNCTION(mod_janus_runtime);
@@ -82,7 +85,8 @@ struct private_object {
 	janus_id_t serverId;
 	janus_id_t roomId;
 	char *pDisplay;
-	janus_id_t senderId;
+	janus_id_t audioSenderId;
+	janus_id_t videoSenderId;
 
 	char *pSdpBody;
 	char *pSdpCandidates;
@@ -161,11 +165,20 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Generated SDP=%s\n", tech_pvt->mparams.local_sdp_str);
 
-	if (apiConfigure(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId,
+	if (apiConfigure(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->audioSenderId,
 					switch_channel_var_true(channel, "janus-start-muted"),
 					switch_channel_var_true(channel, "janus-user-record"),
 					switch_channel_get_variable(channel, "janus-user-record-file"),
 					"offer", tech_pvt->mparams.local_sdp_str) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to configure\n");
+		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
+	}
+
+	if (apiConfigure(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->videoSenderId,
+					 switch_channel_var_true(channel, "janus-start-muted"),
+					 switch_channel_var_true(channel, "janus-user-record"),
+					 switch_channel_get_variable(channel, "janus-user-record-file"),
+					 "offer", tech_pvt->mparams.local_sdp_str) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to configure\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
 	}
@@ -385,7 +398,8 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 					switch_assert(channel);
 					//NB. the server is likely to have been removed by the time the hangup has completed
 					switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
-					(void) hashDelete(&pServer->senderIdLookup, tech_pvt->senderId);
+					(void) hashDelete(&pServer->senderIdLookup, tech_pvt->audioSenderId);
+                    (void) hashDelete(&pServer->senderIdLookup, tech_pvt->videoSenderId);
 				}
 				// reset serverId so we get a new one the next time around
 				serverId = 0;
@@ -521,26 +535,50 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	tech_pvt->senderId = apiGetSenderId(pServer->pUrl, pServer->pSecret, tech_pvt->serverId);
-	if (!tech_pvt->senderId) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error getting senderId\n");
+	tech_pvt->audioSenderId = apiGetSenderId(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, JANUS_AUDIO_PLUGIN);
+	tech_pvt->videoSenderId = apiGetSenderId(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, JANUS_VIDEO_PLUGIN);
+	if (!tech_pvt->audioSenderId) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error getting audio bridge senderId\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (hashInsert(&pServer->senderIdLookup, tech_pvt->senderId, (void *) session) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to insert senderId=%" SWITCH_UINT64_T_FMT " in hash\n", tech_pvt->senderId);
+	if (!tech_pvt->videoSenderId) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error getting video room senderId\n");
+		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (hashInsert(&pServer->senderIdLookup, tech_pvt->audioSenderId, (void *) session) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to insert senderId=%" SWITCH_UINT64_T_FMT " in hash\n", tech_pvt->audioSenderId);
+		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (hashInsert(&pServer->senderIdLookup, tech_pvt->videoSenderId, (void *) session) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to insert senderId=%" SWITCH_UINT64_T_FMT " in hash\n", tech_pvt->audioSenderId);
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;
 	}
 
 	if (switch_channel_var_false(channel, "janus-use-existing-room")) {
-		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
+		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->audioSenderId, tech_pvt->roomId,
 						switch_channel_get_variable(channel, "janus-room-description"),
 						switch_channel_var_true(channel, "janus-room-record"),
 						switch_channel_get_variable(channel, "janus-room-record-file"),
 						switch_channel_get_variable(channel, "janus-room-pin"),
 						switch_channel_var_true(channel, "janus-audio-level-event"))) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create room\n");
+			switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+			return SWITCH_STATUS_FALSE;
+		}
+
+		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->videoSenderId, tech_pvt->roomId,
+						   switch_channel_get_variable(channel, "janus-room-description"),
+						   switch_channel_var_true(channel, "janus-room-record"),
+						   switch_channel_get_variable(channel, "janus-room-record-file"),
+						   switch_channel_get_variable(channel, "janus-room-pin"),
+						   switch_channel_var_true(channel, "janus-audio-level-event"))) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create room\n");
 			switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 			return SWITCH_STATUS_FALSE;
@@ -585,10 +623,19 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 	}
 
 	if (apiJoin(pServer->pUrl, pServer->pSecret, tech_pvt->serverId,
-			tech_pvt->senderId, tech_pvt->roomId, tech_pvt->pDisplay,
+			tech_pvt->audioSenderId, tech_pvt->roomId, tech_pvt->pDisplay,
 			switch_channel_get_variable(channel, "janus-room-pin"),
 			switch_channel_get_variable(channel, "janus-user-token")) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to join room\n");
+		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (apiJoin(pServer->pUrl, pServer->pSecret, tech_pvt->serverId,
+				tech_pvt->videoSenderId, tech_pvt->roomId, tech_pvt->pDisplay,
+				switch_channel_get_variable(channel, "janus-room-pin"),
+				switch_channel_get_variable(channel, "janus-user-token")) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to join video room\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;
 	}
@@ -674,17 +721,28 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	if (apiLeave(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
+	if (apiLeave(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->audioSenderId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to leave room\n");
 		// carry on regardless
 	}
 
-	if (apiDetach(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to detach\n");
+	if (apiLeave(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->videoSenderId) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to leave room\n");
 		// carry on regardless
 	}
 
-	(void) hashDelete(&pServer->senderIdLookup, tech_pvt->senderId);
+	if (apiDetach(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->audioSenderId) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to detach audio bridge\n");
+		// carry on regardless
+	}
+
+	if (apiDetach(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->videoSenderId) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to detach video room\n");
+		// carry on regardless
+	}
+
+	(void) hashDelete(&pServer->senderIdLookup, tech_pvt->audioSenderId);
+	(void) hashDelete(&pServer->senderIdLookup, tech_pvt->videoSenderId);
 
 	switch_mutex_lock(pServer->mutex);
 	if (pServer->callsInProgress > 0) {

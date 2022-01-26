@@ -39,7 +39,7 @@ typedef uint64_t janus_id_t;
 
 #include  "hash.h"
 
-typedef struct {
+typedef struct globals {
   switch_memory_pool_t *pModulePool;
   int debug;
   hash_t serverIdLookup;

@@ -52,6 +52,7 @@ typedef struct {
 	const char *pTransactionId;
 	janus_id_t senderId;
 	switch_bool_t isPlugin;
+	const char *plugin;
 	const char *pSecret;
 	ks_json_t *pJsonBody;
 	ks_json_t *pJsonJsep;
@@ -101,10 +102,10 @@ static ks_json_t *encode(const message_t message) {
 	}
 
 	if (message.isPlugin) {
-		if (ks_json_add_string_to_object(pJsonRequest, "plugin", JANUS_PLUGIN) == NULL) {
-	    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (plugin)\n");
-	    goto error;
-	  }
+		if (ks_json_add_string_to_object(pJsonRequest, "plugin", zstr(message.plugin) ? JANUS_PLUGIN : message.plugin) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (plugin)\n");
+			goto error;
+		}
 	}
 
 	if (message.pJsonBody) {
@@ -389,7 +390,8 @@ switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id
   return result;
 }
 
-janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_t serverId) {
+janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_t serverId,
+						  const char *plugin) {
 	message_t request, *pResponse = NULL;
   janus_id_t senderId = 0;
 
@@ -409,6 +411,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 	request.pTransactionId = pTransactionId;
 	request.pSecret = pSecret;
 	request.isPlugin = SWITCH_TRUE;
+	request.plugin = plugin;
 
 	if (!(pJsonRequest = encode(request))) {
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create request\n");
