@@ -79,6 +79,7 @@ struct private_object {
 	janus_id_t roomId;
 	char *pDisplay;
 	janus_id_t senderId;
+	const char *callId;
 
 	char *pSdpBody;
 	char *pSdpCandidates;
@@ -113,6 +114,7 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 	switch_channel_t *channel;
 	private_t *tech_pvt;
 	server_t *pServer;
+	switch_core_session_t *partner_session;
 
 	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", serverId);
@@ -133,7 +135,40 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 	switch_channel_set_variable(channel, "media_webrtc", "true");
 	switch_channel_set_flag(channel, CF_AUDIO);
 
-	switch_channel_set_variable(channel, "absolute_codec_string", pServer->codec_string);
+	if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+		switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+		// forces the B-leg to use the same codec of A-leg and set rfc2833 flags for DTMF to work
+		// passed by originate flag use-bridged-channel-codec
+		if (switch_channel_var_true(channel, "janus-use-bridged-channel-codec")) {
+			// required to force Freeswitch to add telephone-event in sdp to Janus
+			tech_pvt->mparams.te = 101;
+			tech_pvt->mparams.recv_te = 101;
+			// make sure DTMF input is pass trough and with no delays
+			switch_channel_set_flag(channel, CF_PASS_RFC2833);
+
+			const char *partner_codec = switch_channel_get_variable(partner_channel, "ep_codec_string");
+			const char *partner_dtmf_type = switch_channel_get_variable(partner_channel, "dtmf_type");
+
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using codec from A-Leg: %s\n", partner_codec);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using DTMF Type from A-Leg: %s\n", partner_dtmf_type);
+
+			switch_channel_set_variable(channel, "dtmf_type", partner_dtmf_type);
+			switch_channel_set_variable(channel, "absolute_codec_string", switch_channel_get_variable(partner_channel, partner_codec));
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using codec from janus.conf.xml: %s\n", pServer->codec_string);
+			switch_channel_set_variable(channel, "absolute_codec_string", pServer->codec_string);
+		}
+		switch_core_session_rwunlock(partner_session);
+	} else if (switch_channel_var_true(channel, "janus-use-bridged-channel-codec")) {
+		// Make sure that telephone-event is added to the SDP towards Janus
+		tech_pvt->mparams.te = 101;
+		tech_pvt->mparams.recv_te = 101;
+		// make sure DTMF input is pass trough and with no delays
+		switch_channel_set_flag(channel, CF_PASS_RFC2833);
+
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using default DTMF Type: rfc2833 \n");
+		switch_channel_set_variable(channel, "dtmf_type", "rfc2833");
+	}
 
 	switch_core_media_prepare_codecs(session, SWITCH_TRUE);
 
@@ -157,14 +192,21 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Generated SDP=%s\n", tech_pvt->mparams.local_sdp_str);
 
-	if (apiConfigure(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId,
+	if (apiConfigure(pServer->pUrl, 
+					pServer->pSecret, 
+					tech_pvt->serverId, 
+					tech_pvt->senderId,
 					switch_channel_var_true(channel, "janus-start-muted"),
 					switch_channel_var_true(channel, "janus-user-record"),
 					switch_channel_get_variable(channel, "janus-user-record-file"),
-					"offer", tech_pvt->mparams.local_sdp_str) != SWITCH_STATUS_SUCCESS) {
+					"offer", 
+					tech_pvt->mparams.local_sdp_str,
+					tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to configure\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
 	}
+
+	switch_channel_mark_ring_ready(channel);
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -193,23 +235,26 @@ switch_status_t proceed(switch_core_session_t *session) {
 		(void) strncat(sdp, tech_pvt->pSdpCandidates, sizeof(sdp) - 1);
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "ACCEPTED sdp=%s\n", sdp);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "ACCEPTED sdp=%s\n", sdp);
 
-	if (!switch_core_media_negotiate_sdp(session, sdp, NULL, SDP_TYPE_RESPONSE)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Cannot negotiate SDP\n");
-		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
+	if (switch_core_media_negotiate_sdp(session, sdp, NULL, SDP_TYPE_RESPONSE)) {
+		if (switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "switch_core_media_activate_rtp error\n");
+			switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
+			return SWITCH_STATUS_FALSE;
+		}
+	} else{
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot negotiate SDP\n");
+		switch_channel_hangup(channel, SWITCH_CAUSE_MEDIA_TIMEOUT);
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Doing pre-answer\n");
+	if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Channel pre answer failed.\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "switch_core_media_activate_rtp success\n");
-		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
-		return SWITCH_STATUS_FALSE;
-	}
-
-	switch_yield(1000000);
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "doing pre-answer\n");
-	switch_channel_pre_answer(channel);
+	switch_channel_mark_pre_answered(channel);
 
 	switch_set_flag_locked(tech_pvt, TFLAG_VOICE);
 
@@ -311,7 +356,13 @@ switch_status_t answered(janus_id_t serverId, janus_id_t senderId) {
 	channel = switch_core_session_get_channel(session);
 	switch_assert(channel);
 
-	switch_channel_answer(channel);
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Doing answer\n");
+	if (switch_channel_answer(channel) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Channel answer failed.\n");
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_channel_mark_answered(channel);
 
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -365,6 +416,9 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 				if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
 				}
+				switch_mutex_lock(pServer->mutex);
+				pServer->serverId = serverId;
+				switch_mutex_unlock(pServer->mutex);
 			} else {
 				// terminate all calls in progress on this server
 				switch_core_session_t *session;
@@ -379,7 +433,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
  					switch_assert(tech_pvt);
 					channel = switch_core_session_get_channel(session);
 					switch_assert(channel);
-					//NB. the server is likely to have been removed by the time the hangup has completed
+					// the server is likely to have been removed by the time the hangup has completed
 					switch_channel_hangup(channel, SWITCH_CAUSE_DESTINATION_OUT_OF_ORDER);
 					(void) hashDelete(&pServer->senderIdLookup, tech_pvt->senderId);
 				}
@@ -403,15 +457,19 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 		}
 
 		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Poll started\n");
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Poll started, serverId: %ld\n", (long)serverId);
 
 			if (apiPoll(pServer->pUrl, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, trickle, answered, hungup) != SWITCH_STATUS_SUCCESS) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Poll failed\n");
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Poll failed, serverId: %ld\n", (long)serverId);
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server from hash table\n");
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server %ld from hash table\n", (long)serverId);
 				}
+				// Reset servers serverId/session_id
+				switch_mutex_lock(pServer->mutex);
+				pServer->serverId = 0;
+				switch_mutex_unlock(pServer->mutex);
 			} else {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Poll completed\n");
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Poll completed, serverId: %ld\n", (long)serverId);
 			}
 		}
 	}
@@ -475,16 +533,16 @@ static void stopServerThread(server_t *pServer) {
 	}
 }
 
-static switch_bool_t isVideoCall(switch_core_session_t *session) {
-	switch_channel_t *channel;
+// static switch_bool_t isVideoCall(switch_core_session_t *session) {
+// 	switch_channel_t *channel;
 
-	switch_assert(session);
+// 	switch_assert(session);
 
-	channel = switch_core_session_get_channel(session);
-	switch_assert(channel);
+// 	channel = switch_core_session_get_channel(session);
+// 	switch_assert(channel);
 
-	return switch_channel_test_flag(channel, CF_VIDEO);
-}
+// 	return switch_channel_test_flag(channel, CF_VIDEO);
+// }
 
 /*
    State methods they get called when the state changes to the specific state
@@ -496,6 +554,7 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	switch_channel_t *channel = NULL;
 	private_t *tech_pvt = NULL;
 	server_t *pServer = NULL;
+	switch_core_session_t *partner_session;
 
 	switch_assert(session);
 
@@ -504,6 +563,18 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 
 	channel = switch_core_session_get_channel(session);
 	switch_assert(channel);
+
+	if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+		switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+		tech_pvt->callId = switch_channel_get_variable(partner_channel, "sip_call_id");
+		switch_core_session_rwunlock(partner_session);
+	} else {
+		tech_pvt->callId = switch_channel_get_variable(channel, "sip_call_id");
+	}
+
+	if (!tech_pvt->callId) {
+		tech_pvt->callId = switch_core_session_get_uuid(session);
+	}
 
 	if (!switch_test_flag(tech_pvt, TFLAG_OUTBOUND)) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Module supports only outgoing calls\n");
@@ -517,10 +588,14 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	tech_pvt->senderId = apiGetSenderId(pServer->pUrl, pServer->pSecret, tech_pvt->serverId);
+	tech_pvt->senderId = apiGetSenderId(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->callId);
 	if (!tech_pvt->senderId) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error getting senderId\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+		// failing to originate cause attach session_id is not found, reset it
+		switch_mutex_lock(pServer->mutex);
+		pServer->serverId = 0;
+		switch_mutex_unlock(pServer->mutex);
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -568,6 +643,12 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 	channel = switch_core_session_get_channel(session);
 	switch_assert(channel);
 
+	if (switch_channel_get_callstate(channel) == CCS_EARLY) {
+		// Channel re-routing, dialplan transfer called, do not send join again
+		DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "%s Channel re-routing, dialplan transfer called.\n", switch_channel_get_name(channel));
+		return SWITCH_STATUS_SUCCESS;
+	}
+
 	tech_pvt = switch_core_session_get_private(session);
 	switch_assert(tech_pvt);
 
@@ -579,10 +660,16 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	if (apiJoin(pServer->pUrl, pServer->pSecret, tech_pvt->serverId,
-			tech_pvt->senderId, tech_pvt->roomId, tech_pvt->pDisplay,
-			switch_channel_get_variable(channel, "janus-room-pin"),
-			switch_channel_get_variable(channel, "janus-user-token")) != SWITCH_STATUS_SUCCESS) {
+	if (apiJoin(
+				pServer->pUrl,
+				pServer->pSecret,
+				tech_pvt->serverId,
+				tech_pvt->senderId,
+				tech_pvt->roomId,
+				tech_pvt->pDisplay,
+				switch_channel_get_variable(channel, "janus-room-pin"),
+				switch_channel_get_variable(channel, "janus-user-token"),
+				tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to join room\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;
@@ -647,6 +734,7 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 	switch_channel_t *channel = NULL;
 	private_t *tech_pvt = NULL;
 	server_t *pServer = NULL;
+	switch_core_session_t *partner_session;
 
 	switch_assert(session);
 
@@ -656,7 +744,18 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 	tech_pvt = switch_core_session_get_private(session);
 	switch_assert(tech_pvt);
 
+    // proper cleanup of media
 	switch_core_media_kill_socket(session, SWITCH_MEDIA_TYPE_AUDIO);
+	switch_core_session_stop_media(session);
+
+
+	/* Assure partner session is closed
+	   (sometimes doesn't happen automatically, for example during playback) */
+	if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+		switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+		switch_channel_hangup(partner_channel, SWITCH_CAUSE_NORMAL_CLEARING);
+		switch_core_session_rwunlock(partner_session);
+	}
 
 	switch_clear_flag_locked(tech_pvt, TFLAG_IO);
 	switch_clear_flag_locked(tech_pvt, TFLAG_VOICE);
@@ -669,7 +768,7 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	if (apiLeave(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
+	if (apiLeave(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to leave room\n");
 		// carry on regardless
 	}
@@ -751,48 +850,86 @@ static switch_status_t channel_send_dtmf(switch_core_session_t *session, const s
 
 static switch_status_t channel_read_frame(switch_core_session_t *session, switch_frame_t **frame, switch_io_flag_t flags, int stream_id)
 {
-	switch_channel_t *channel = NULL;
-	private_t *tech_pvt = NULL;
-	//switch_time_t started = switch_time_now();
-	//unsigned int elapsed;
-	switch_byte_t *data;
+//  removing code that on some cases core dumps
+//
+// 	switch_channel_t *channel = NULL;
+// 	private_t *tech_pvt = NULL;
+// 	//switch_time_t started = switch_time_now();
+// 	//unsigned int elapsed;
+// 	switch_byte_t *data;
+//
+// 	//DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Read frame called\n");
+//
+// 	channel = switch_core_session_get_channel(session);
+// 	assert(channel != NULL);
+//
+// 	tech_pvt = switch_core_session_get_private(session);
+// 	switch_assert(tech_pvt);
+//
+// 	tech_pvt->read_frame.flags = SFF_NONE;
+// 	*frame = NULL;
+//
+// 	switch_set_flag(tech_pvt, TFLAG_VOICE);
+//
+// 	while (switch_test_flag(tech_pvt, TFLAG_IO)) {
+//
+// 		if (switch_test_flag(tech_pvt, TFLAG_BREAK)) {
+// 			switch_clear_flag(tech_pvt, TFLAG_BREAK);
+// 			goto cng;
+// 		}
+//
+// 		if (!switch_test_flag(tech_pvt, TFLAG_IO)) {
+// 			return SWITCH_STATUS_FALSE;
+// 		}
+//
+// 		if (switch_test_flag(tech_pvt, TFLAG_IO) && switch_test_flag(tech_pvt, TFLAG_VOICE)) {
+// 			switch_clear_flag_locked(tech_pvt, TFLAG_VOICE);
+// 			if (!tech_pvt->read_frame.datalen) {
+// 				continue;
+// 			}
+// 			*frame = &tech_pvt->read_frame;
+// #if SWITCH_BYTE_ORDER == __BIG_ENDIAN
+// 			if (switch_test_flag(tech_pvt, TFLAG_LINEAR)) {
+// 				switch_swap_linear((*frame)->data, (int) (*frame)->datalen / 2);
+// 			}
+// #endif
+// 			return switch_core_media_read_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
+// 		}
+//
+// 		switch_cond_next();
+// 	}
+//
+//
+// 	return SWITCH_STATUS_FALSE;
+//
+//   cng:
+// 	data = (switch_byte_t *) tech_pvt->read_frame.data;
+// 	data[0] = 65;
+// 	data[1] = 0;
+// 	tech_pvt->read_frame.datalen = 2;
+// 	tech_pvt->read_frame.flags = SFF_CNG;
+// 	*frame = &tech_pvt->read_frame;
+// 	return SWITCH_STATUS_SUCCESS;
 
-	//DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Read frame called\n");
-
-	channel = switch_core_session_get_channel(session);
-	assert(channel != NULL);
-
-	tech_pvt = switch_core_session_get_private(session);
-	switch_assert(tech_pvt);
-
-	tech_pvt->read_frame.flags = SFF_NONE;
-	*frame = NULL;
-
-	switch_set_flag(tech_pvt, TFLAG_VOICE);
-
-	while (switch_test_flag(tech_pvt, TFLAG_IO)) {
-
-		if (switch_test_flag(tech_pvt, TFLAG_BREAK)) {
-			switch_clear_flag(tech_pvt, TFLAG_BREAK);
-			goto cng;
-		}
-
-		if (!switch_test_flag(tech_pvt, TFLAG_IO)) {
-			return SWITCH_STATUS_FALSE;
-		}
-
-		if (switch_test_flag(tech_pvt, TFLAG_IO) && switch_test_flag(tech_pvt, TFLAG_VOICE)) {
-			switch_clear_flag_locked(tech_pvt, TFLAG_VOICE);
-			if (!tech_pvt->read_frame.datalen) {
-				continue;
-			}
-			*frame = &tech_pvt->read_frame;
-#if SWITCH_BYTE_ORDER == __BIG_ENDIAN
-			if (switch_test_flag(tech_pvt, TFLAG_LINEAR)) {
-				switch_swap_linear((*frame)->data, (int) (*frame)->datalen / 2);
-			}
-#endif
 			return switch_core_media_read_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
+		}
+
+		switch_cond_next();
+	}
+
+
+	return SWITCH_STATUS_FALSE;
+
+  cng:
+	data = (switch_byte_t *) tech_pvt->read_frame.data;
+	data[0] = 65;
+	data[1] = 0;
+	tech_pvt->read_frame.datalen = 2;
+	tech_pvt->read_frame.flags = SFF_CNG;
+	*frame = &tech_pvt->read_frame;
+	return SWITCH_STATUS_SUCCESS;
+
+	return switch_core_media_read_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
 		}
 
 		switch_cond_next();
@@ -814,25 +951,27 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 
 static switch_status_t channel_write_frame(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags, int stream_id)
 {
-	//switch_status_t status = SWITCH_STATUS_SUCCESS;
-	switch_channel_t *channel = NULL;
-	private_t *tech_pvt = NULL;
-	//switch_frame_t *pframe;
-
-	channel = switch_core_session_get_channel(session);
-	switch_assert(channel);
-
-	tech_pvt = switch_core_session_get_private(session);
-	switch_assert(tech_pvt);
-
-	if (!switch_test_flag(tech_pvt, TFLAG_IO)) {
-		return SWITCH_STATUS_FALSE;
-	}
-#if SWITCH_BYTE_ORDER == __BIG_ENDIAN
-	if (switch_test_flag(tech_pvt, TFLAG_LINEAR)) {
-		switch_swap_linear(frame->data, (int) frame->datalen / 2);
-	}
-#endif
+// removing code that on some cases core dumps
+//
+//switch_status_t status = SWITCH_STATUS_SUCCESS;
+// 	switch_channel_t *channel = NULL;
+// 	private_t *tech_pvt = NULL;
+// 	//switch_frame_t *pframe;
+//
+// 	channel = switch_core_session_get_channel(session);
+// 	switch_assert(channel);
+//
+// 	tech_pvt = switch_core_session_get_private(session);
+// 	switch_assert(tech_pvt);
+//
+// 	if (!switch_test_flag(tech_pvt, TFLAG_IO)) {
+// 		return SWITCH_STATUS_FALSE;
+// 	}
+// #if SWITCH_BYTE_ORDER == __BIG_ENDIAN
+// 	if (switch_test_flag(tech_pvt, TFLAG_LINEAR)) {
+// 		switch_swap_linear(frame->data, (int) frame->datalen / 2);
+// 	}
+// #endif
 
 	return switch_core_media_write_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
 }
@@ -894,10 +1033,11 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	switch_call_cause_t status = SWITCH_CAUSE_SUCCESS;
 	server_t *pTmpServer, *pServer;
 
-	if (isVideoCall(session)) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Only implemented for audio calls\n");
-		return SWITCH_CAUSE_BEARERCAPABILITY_NOTIMPL;
-	}
+	// this check has been disabled due to the fact that FreeSWITCH crashes in some cases
+	// if (isVideoCall(session)) {
+	// 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Only implemented for audio calls\n");
+	// 	return SWITCH_CAUSE_BEARERCAPABILITY_NOTIMPL;
+	// }
 
 	*new_session = switch_core_session_request(janus_endpoint_interface, SWITCH_CALL_DIRECTION_OUTBOUND, flags, pool);
 
@@ -1000,8 +1140,6 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	caller_profile = switch_caller_profile_clone(*new_session, outbound_profile);
 	switch_channel_set_caller_profile(channel, caller_profile);
 	tech_pvt->caller_profile = caller_profile;
-
-	switch_channel_ring_ready(channel);
 
 	switch_set_flag_locked(tech_pvt, TFLAG_OUTBOUND);
 

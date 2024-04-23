@@ -49,7 +49,7 @@ typedef struct {
 	char *pAuthToken;
 	switch_thread_t *pThread;
 
-  char *local_network;
+	char *local_network;
 	char *extrtpip;
 
 	char *cand_acl[SWITCH_MAX_CAND_ACL];
@@ -60,20 +60,20 @@ typedef struct {
 	char *codec_string;
 
 	switch_mutex_t *flag_mutex;
-  unsigned int flags;
+	unsigned int flags;
 
-  switch_mutex_t *mutex;
+	switch_mutex_t *mutex;
 
-  hash_t senderIdLookup;
+	hash_t senderIdLookup;
 
-  // values that may be changed go under here - the static values
-  // above are only modified during initialisation and so we
-  // not mutexed
-  janus_id_t serverId;
+	// values that may be changed go under here - the static values
+	// above are only modified during initialisation and so we
+	// not mutexed
+
+	janus_id_t serverId;
 	switch_time_t started;
-  unsigned int totalCalls;
-  unsigned int callsInProgress;
-
+	unsigned int totalCalls;
+	unsigned int callsInProgress;
 } server_t;
 
 switch_status_t serversList(const char *pLine, const char *pCursor, switch_console_callback_match_t **matches);
