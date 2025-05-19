@@ -34,7 +34,7 @@
  */
 
 #include	"switch.h"
-#include  "switch_curl.h"
+#include  	"switch_curl.h"
 
 #include	"globals.h"
 #include	"http.h"
@@ -911,42 +911,7 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 // 	*frame = &tech_pvt->read_frame;
 // 	return SWITCH_STATUS_SUCCESS;
 
-			return switch_core_media_read_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
-		}
-
-		switch_cond_next();
-	}
-
-
-	return SWITCH_STATUS_FALSE;
-
-  cng:
-	data = (switch_byte_t *) tech_pvt->read_frame.data;
-	data[0] = 65;
-	data[1] = 0;
-	tech_pvt->read_frame.datalen = 2;
-	tech_pvt->read_frame.flags = SFF_CNG;
-	*frame = &tech_pvt->read_frame;
-	return SWITCH_STATUS_SUCCESS;
-
 	return switch_core_media_read_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
-		}
-
-		switch_cond_next();
-	}
-
-
-	return SWITCH_STATUS_FALSE;
-
-  cng:
-	data = (switch_byte_t *) tech_pvt->read_frame.data;
-	data[0] = 65;
-	data[1] = 0;
-	tech_pvt->read_frame.datalen = 2;
-	tech_pvt->read_frame.flags = SFF_CNG;
-	*frame = &tech_pvt->read_frame;
-	return SWITCH_STATUS_SUCCESS;
-
 }
 
 static switch_status_t channel_write_frame(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags, int stream_id)
