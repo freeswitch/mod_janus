@@ -706,6 +706,166 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
   	return result;
 }
 
+/* Join and configure in one request: join body + jsep offer (room id + SDP offer in same message) */
+switch_status_t apiJoinAndConfigure(const char *pUrl, const char *pSecret,
+		const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pRoomIdStr,
+		const char *pDisplay, const char *pPin, const char *pToken, const char *callId,
+		const switch_bool_t muted, switch_bool_t record, const char *pRecordingFile,
+		const char *pType, const char *pSdp) {
+	message_t request, *pResponse = NULL;
+	switch_status_t result = SWITCH_STATUS_SUCCESS;
+
+	cJSON *pJsonRequest = NULL;
+	cJSON *pJsonResponse = NULL;
+	char *pTransactionId = generateTransactionId();
+	char url[1024];
+
+	switch_assert(pUrl);
+	switch_assert(pType);
+	switch_assert(pSdp);
+
+	(void) memset((void *) &request, 0, sizeof(request));
+	request.pType = "message";
+	request.serverId = serverId;
+	request.pTransactionId = pTransactionId;
+	request.pSecret = pSecret;
+
+	request.pJsonBody = cJSON_CreateObject();
+	if (request.pJsonBody == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create body\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+
+	if (cJSON_AddStringToObject(request.pJsonBody, "request", "join") == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.request)\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+
+	if (pRoomIdStr && *pRoomIdStr != '\0') {
+		if (cJSON_AddStringToObject(request.pJsonBody, "room", pRoomIdStr) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.room)\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	} else if (cJSON_AddNumberToObject(request.pJsonBody, "room", roomId) == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create number (body.room)\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+
+	if (pPin) {
+		if (cJSON_AddStringToObject(request.pJsonBody, "pin", pPin) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.pin)\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	}
+
+	if (pDisplay) {
+		if (cJSON_AddStringToObject(request.pJsonBody, "display", pDisplay) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.display)\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	}
+
+	if (pToken) {
+		if (cJSON_AddStringToObject(request.pJsonBody, "token", pToken) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.token)\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	}
+
+	if (callId) {
+		if (cJSON_AddStringToObject(request.pJsonBody, "opaque_id", callId) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.opaque_id)\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	}
+
+	/* configure params in same body */
+	if (cJSON_AddBoolToObject(request.pJsonBody, "muted", (cJSON_bool) muted) == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create boolean (body.muted)\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+	if (cJSON_AddBoolToObject(request.pJsonBody, "record", (cJSON_bool) record) == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create boolean (body.record)\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+	if (pRecordingFile) {
+		if (cJSON_AddStringToObject(request.pJsonBody, "filename", pRecordingFile) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.filename)\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	}
+
+	/* jsep: offer SDP */
+	request.pJsonJsep = cJSON_CreateObject();
+	if (request.pJsonJsep == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create jsep\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+	if (cJSON_AddStringToObject(request.pJsonJsep, "type", pType) == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (jsep.type)\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+	if (cJSON_AddFalseToObject(request.pJsonJsep, "trickle") == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create jsep.trickle\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+	if (cJSON_AddStringToObject(request.pJsonJsep, "sdp", pSdp) == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (jsep.sdp)\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+
+	if (!(pJsonRequest = encode(request))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create request\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+
+	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pUrl, serverId, senderId) < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+
+	DEBUG(SWITCH_CHANNEL_LOG, "Sending join-and-configure HTTP request\n");
+	pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+
+	if (!(pResponse = decode(pJsonResponse))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+
+	if (!pResponse->pType || strcmp("ack", pResponse->pType) ||
+			!pResponse->pTransactionId || strcmp(pTransactionId, pResponse->pTransactionId)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Value mismatch\n");
+		result = SWITCH_STATUS_FALSE;
+		goto done;
+	}
+
+done:
+	cJSON_Delete(pJsonRequest);
+	cJSON_Delete(pJsonResponse);
+	switch_safe_free(pResponse);
+	switch_safe_free(pTransactionId);
+
+	return result;
+}
+
 switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
 		const janus_id_t serverId, const janus_id_t senderId, const switch_bool_t muted,
 		switch_bool_t record, const char *pRecordingFile,

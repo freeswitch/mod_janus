@@ -59,7 +59,8 @@ typedef enum {
 	TFLAG_HANGUP = (1 << 5),
 	TFLAG_LINEAR = (1 << 6),
 	TFLAG_CODEC = (1 << 7),
-	TFLAG_BREAK = (1 << 8)
+	TFLAG_BREAK = (1 << 8),
+	TFLAG_JOIN_AND_CONFIGURE = (1 << 9)
 } TFLAGS;
 
 struct private_object {
@@ -135,75 +136,78 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 	switch_channel_set_variable(channel, "media_webrtc", "true");
 	switch_channel_set_flag(channel, CF_AUDIO);
 
-	if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
-		switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
-		// forces the B-leg to use the same codec of A-leg and set rfc2833 flags for DTMF to work
-		// passed by originate flag use-bridged-channel-codec
-		if (switch_channel_var_true(channel, "janus-use-bridged-channel-codec")) {
-			// required to force Freeswitch to add telephone-event in sdp to Janus
+	/* When join-and-configure was used, SDP offer was sent with join; skip configure path */
+	if (!switch_test_flag(tech_pvt, TFLAG_JOIN_AND_CONFIGURE)) {
+		if (switch_core_session_get_partner(session, &partner_session) == SWITCH_STATUS_SUCCESS) {
+			switch_channel_t *partner_channel = switch_core_session_get_channel(partner_session);
+			// forces the B-leg to use the same codec of A-leg and set rfc2833 flags for DTMF to work
+			// passed by originate flag use-bridged-channel-codec
+			if (switch_channel_var_true(channel, "janus-use-bridged-channel-codec")) {
+				// required to force Freeswitch to add telephone-event in sdp to Janus
+				tech_pvt->mparams.te = 101;
+				tech_pvt->mparams.recv_te = 101;
+				// make sure DTMF input is pass trough and with no delays
+				switch_channel_set_flag(channel, CF_PASS_RFC2833);
+
+				const char *partner_codec = switch_channel_get_variable(partner_channel, "ep_codec_string");
+				const char *partner_dtmf_type = switch_channel_get_variable(partner_channel, "dtmf_type");
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using codec from A-Leg: %s\n", partner_codec);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using DTMF Type from A-Leg: %s\n", partner_dtmf_type);
+
+				switch_channel_set_variable(channel, "dtmf_type", partner_dtmf_type);
+				switch_channel_set_variable(channel, "absolute_codec_string", switch_channel_get_variable(partner_channel, partner_codec));
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using codec from janus.conf.xml: %s\n", pServer->codec_string);
+				switch_channel_set_variable(channel, "absolute_codec_string", pServer->codec_string);
+			}
+			switch_core_session_rwunlock(partner_session);
+		} else if (switch_channel_var_true(channel, "janus-use-bridged-channel-codec")) {
+			// Make sure that telephone-event is added to the SDP towards Janus
 			tech_pvt->mparams.te = 101;
 			tech_pvt->mparams.recv_te = 101;
 			// make sure DTMF input is pass trough and with no delays
 			switch_channel_set_flag(channel, CF_PASS_RFC2833);
 
-			const char *partner_codec = switch_channel_get_variable(partner_channel, "ep_codec_string");
-			const char *partner_dtmf_type = switch_channel_get_variable(partner_channel, "dtmf_type");
-
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using codec from A-Leg: %s\n", partner_codec);
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using DTMF Type from A-Leg: %s\n", partner_dtmf_type);
-
-			switch_channel_set_variable(channel, "dtmf_type", partner_dtmf_type);
-			switch_channel_set_variable(channel, "absolute_codec_string", switch_channel_get_variable(partner_channel, partner_codec));
-		} else {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using codec from janus.conf.xml: %s\n", pServer->codec_string);
-			switch_channel_set_variable(channel, "absolute_codec_string", pServer->codec_string);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using default DTMF Type: rfc2833 \n");
+			switch_channel_set_variable(channel, "dtmf_type", "rfc2833");
 		}
-		switch_core_session_rwunlock(partner_session);
-	} else if (switch_channel_var_true(channel, "janus-use-bridged-channel-codec")) {
-		// Make sure that telephone-event is added to the SDP towards Janus
-		tech_pvt->mparams.te = 101;
-		tech_pvt->mparams.recv_te = 101;
-		// make sure DTMF input is pass trough and with no delays
-		switch_channel_set_flag(channel, CF_PASS_RFC2833);
 
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Using default DTMF Type: rfc2833 \n");
-		switch_channel_set_variable(channel, "dtmf_type", "rfc2833");
-	}
+		switch_core_media_prepare_codecs(session, SWITCH_TRUE);
 
-	switch_core_media_prepare_codecs(session, SWITCH_TRUE);
+		switch_core_session_set_ice(session);
 
-	switch_core_session_set_ice(session);
+		for (unsigned int i = 0; i < pServer->cand_acl_count; i ++) {
+			switch_core_media_add_ice_acl(session, SWITCH_MEDIA_TYPE_AUDIO, pServer->cand_acl[i]);
+		}
 
-	for (unsigned int i = 0; i < pServer->cand_acl_count; i ++) {
-		switch_core_media_add_ice_acl(session, SWITCH_MEDIA_TYPE_AUDIO, pServer->cand_acl[i]);
-	}
+		if (switch_core_media_choose_ports(session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot choose ports\n");
+			switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
+			return SWITCH_STATUS_FALSE;
+		}
 
-	if (switch_core_media_choose_ports(session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot choose ports\n");
-		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
-		return SWITCH_STATUS_FALSE;
-	}
+		switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0, NULL, 0);
 
-	switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0, NULL, 0);
+		//switch_channel_set_flag(channel, CF_REQ_MEDIA);
+		//switch_channel_set_flag(channel, CF_MEDIA_ACK);
+		//switch_channel_set_flag(channel, CF_MEDIA_SET);
 
-	//switch_channel_set_flag(channel, CF_REQ_MEDIA);
-	//switch_channel_set_flag(channel, CF_MEDIA_ACK);
-	//switch_channel_set_flag(channel, CF_MEDIA_SET);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Generated SDP=%s\n", tech_pvt->mparams.local_sdp_str);
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Generated SDP=%s\n", tech_pvt->mparams.local_sdp_str);
-
-	if (apiConfigure(pServer->pUrl, 
-					pServer->pSecret, 
-					tech_pvt->serverId, 
-					tech_pvt->senderId,
-					switch_channel_var_true(channel, "janus-start-muted"),
-					switch_channel_var_true(channel, "janus-user-record"),
-					switch_channel_get_variable(channel, "janus-user-record-file"),
-					"offer", 
-					tech_pvt->mparams.local_sdp_str,
-					tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to configure\n");
-		switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
+		if (apiConfigure(pServer->pUrl, 
+						pServer->pSecret, 
+						tech_pvt->serverId, 
+						tech_pvt->senderId,
+						switch_channel_var_true(channel, "janus-start-muted"),
+						switch_channel_var_true(channel, "janus-user-record"),
+						switch_channel_get_variable(channel, "janus-user-record-file"),
+						"offer", 
+						tech_pvt->mparams.local_sdp_str,
+						tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to configure\n");
+			switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
+		}
 	}
 
 	switch_channel_mark_ring_ready(channel);
@@ -658,6 +662,51 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", tech_pvt->serverId);
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_NOTFOUND;
+	}
+
+	if (switch_channel_var_true(channel, "janus-join-and-configure")) {
+		/* Combine join and configure: generate SDP before join, send one request with room + offer */
+		if (pServer->codec_string) {
+			switch_channel_set_variable(channel, "absolute_codec_string", pServer->codec_string);
+		}
+		switch_channel_set_variable(channel, "dtmf_type", "rfc2833");
+		tech_pvt->mparams.te = 101;
+		tech_pvt->mparams.recv_te = 101;
+
+		switch_core_media_prepare_codecs(session, SWITCH_TRUE);
+		switch_core_session_set_ice(session);
+		for (unsigned int i = 0; i < pServer->cand_acl_count; i++) {
+			switch_core_media_add_ice_acl(session, SWITCH_MEDIA_TYPE_AUDIO, pServer->cand_acl[i]);
+		}
+		if (switch_core_media_choose_ports(session, SWITCH_TRUE, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot choose ports (join-and-configure)\n");
+			switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
+			return SWITCH_STATUS_FALSE;
+		}
+		switch_core_media_gen_local_sdp(session, SDP_TYPE_REQUEST, NULL, 0, NULL, 0);
+
+		if (apiJoinAndConfigure(
+					pServer->pUrl,
+					pServer->pSecret,
+					tech_pvt->serverId,
+					tech_pvt->senderId,
+					tech_pvt->roomId,
+					tech_pvt->pRoomIdStr,
+					tech_pvt->pDisplay,
+					switch_channel_get_variable(channel, "janus-room-pin"),
+					switch_channel_get_variable(channel, "janus-user-token"),
+					tech_pvt->callId,
+					switch_channel_var_true(channel, "janus-start-muted"),
+					switch_channel_var_true(channel, "janus-user-record"),
+					switch_channel_get_variable(channel, "janus-user-record-file"),
+					"offer",
+					tech_pvt->mparams.local_sdp_str) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to join-and-configure\n");
+			switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
+			return SWITCH_STATUS_FALSE;
+		}
+		switch_set_flag_locked(tech_pvt, TFLAG_JOIN_AND_CONFIGURE);
+		return SWITCH_STATUS_SUCCESS;
 	}
 
 	if (apiJoin(
