@@ -76,7 +76,8 @@ struct private_object {
 	switch_core_media_params_t mparams;
 
 	janus_id_t serverId;
-	janus_id_t roomId;
+	janus_id_t roomId;       /* numeric room when pRoomIdStr is NULL */
+	char *pRoomIdStr;        /* string room (e.g. UUID) when Janus string_ids=true */
 	char *pDisplay;
 	janus_id_t senderId;
 	const char *callId;
@@ -606,7 +607,7 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	}
 
 	if (switch_channel_var_false(channel, "janus-use-existing-room")) {
-		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
+		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId, tech_pvt->pRoomIdStr,
 						switch_channel_get_variable(channel, "janus-room-description"),
 						switch_channel_var_true(channel, "janus-room-record"),
 						switch_channel_get_variable(channel, "janus-room-record-file"),
@@ -666,6 +667,7 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 				tech_pvt->serverId,
 				tech_pvt->senderId,
 				tech_pvt->roomId,
+				tech_pvt->pRoomIdStr,
 				tech_pvt->pDisplay,
 				switch_channel_get_variable(channel, "janus-room-pin"),
 				switch_channel_get_variable(channel, "janus-user-token"),
@@ -1097,10 +1099,16 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		status = SWITCH_CAUSE_PROTOCOL_ERROR;
 		goto error;
 	}
-	*pNext ++ = '\0';
+	*pNext++ = '\0';
 
 	tech_pvt->pDisplay = switch_core_session_strdup(*new_session, pCurr);
-	tech_pvt->roomId = strtoull(pNext, NULL, 10);
+	/* Room: store full string (supports UUID when Janus string_ids=true); strtoull would stop at first non-digit */
+	tech_pvt->pRoomIdStr = switch_core_session_strdup(*new_session, pNext);
+	{
+		char *end = NULL;
+		unsigned long long n = strtoull(pNext, &end, 10);
+		tech_pvt->roomId = (end && *end == '\0') ? (janus_id_t) n : 0;
+	}
 
 	caller_profile = switch_caller_profile_clone(*new_session, outbound_profile);
 	switch_channel_set_caller_profile(channel, caller_profile);
