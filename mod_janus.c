@@ -77,7 +77,7 @@ struct private_object {
 
 	janus_id_t serverId;
 	janus_id_t roomId;       /* numeric room id; 0 when using string room (pRoomIdStr) */
-	char *pRoomIdStr;        /* room as string (e.g. uuid); when set, when string_ids = true in janus.jcfg */
+	char *pRoomIdStr;        /* room as string (e.g. uuid); when set, Janus "room" is sent as string */
 	char *pDisplay;
 	janus_id_t senderId;
 	const char *callId;
