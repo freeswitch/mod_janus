@@ -337,8 +337,25 @@ switch_status_t trickle(janus_id_t serverId, janus_id_t senderId, const char *pC
 	}
 }
 
+switch_bool_t answer_on_webrtcup(janus_id_t serverId, janus_id_t senderId) {
+	switch_core_session_t *session;
+	switch_channel_t *channel;
+	server_t *pServer;
+	const char *var;
+
+	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
+		return SWITCH_FALSE;
+	}
+	if (!(session = (switch_core_session_t *) hashFind(&pServer->senderIdLookup, senderId))) {
+		return SWITCH_FALSE;
+	}
+	channel = switch_core_session_get_channel(session);
+	var = switch_channel_get_variable(channel, "answer_on_webrtcup");
+	return switch_true(var) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 switch_status_t answered(janus_id_t serverId, janus_id_t senderId) {
-	// called when we get a webrtcup event from Janus
+	/* called from api.c on SDP answer jsep event or on webrtcup event (single place that answers the channel) */
 	switch_core_session_t *session;
 	switch_channel_t *channel;
 	server_t *pServer;
@@ -459,7 +476,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Poll started, serverId: %ld\n", (long)serverId);
 
-			if (apiPoll(pServer->pUrl, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, trickle, answered, hungup) != SWITCH_STATUS_SUCCESS) {
+			if (apiPoll(pServer->pUrl, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, trickle, answer_on_webrtcup, answered, hungup) != SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Poll failed, serverId: %ld\n", (long)serverId);
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server %ld from hash table\n", (long)serverId);

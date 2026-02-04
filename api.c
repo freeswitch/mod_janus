@@ -967,6 +967,7 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
   	switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
   	switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
+	switch_bool_t (*pAnswerOnWebrtcupFunc)(const janus_id_t serverId, const janus_id_t senderId),
   	switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
   	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason)) {
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
@@ -1051,6 +1052,12 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 			}
 		} else if (!strcmp(pResponse->pType, "webrtcup")) {
 			DEBUG(SWITCH_CHANNEL_LOG, "WebRTC has been setup\n");
+			/* Answer on webrtcup only when channel has answer_on_webrtcup set */
+			if (pAnswerOnWebrtcupFunc && pAnswerOnWebrtcupFunc(pResponse->serverId, pResponse->senderId)) {
+				if ((*pAnsweredFunc)(pResponse->serverId, pResponse->senderId)) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't answer (on webrtcup)\n");
+				}
+			}
 		} else if (!strcmp(pResponse->pType, "media")) {
 			DEBUG(SWITCH_CHANNEL_LOG, "Media is flowing\n");
 		} else if (!strcmp(pResponse->pType, "trickle")) {
@@ -1120,8 +1127,11 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't accept\n");
 					}
 
-					if ((*pAnsweredFunc)(pResponse->serverId, pResponse->senderId)) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't answer\n");
+					/* Answer on jsep unless channel has answer_on_webrtcup set */
+					if (!pAnswerOnWebrtcupFunc || !pAnswerOnWebrtcupFunc(pResponse->serverId, pResponse->senderId)) {
+						if ((*pAnsweredFunc)(pResponse->serverId, pResponse->senderId)) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't answer\n");
+						}
 					}
 				} else if ((pJsonRspType = cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "leaving")) != NULL) {
 					if (!cJSON_IsNumber(pJsonRspType)) {
