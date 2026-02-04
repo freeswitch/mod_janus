@@ -464,7 +464,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 }
 
 janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId,
-		const janus_id_t senderId, const janus_id_t roomId, const char *pDescription,
+		const janus_id_t senderId, const janus_id_t roomId, const char *pRoomIdStr, const char *pDescription,
 		switch_bool_t record, const char *pRecordingFile, const char *pPin) {
 	message_t request, *pResponse = NULL;
 	janus_id_t result = 0;
@@ -498,8 +498,13 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 		goto done;
 	}
 
-	if (cJSON_AddNumberToObject(request.pJsonBody, "room", roomId) == NULL) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.room)\n");
+	if (pRoomIdStr && *pRoomIdStr != '\0') {
+		if (cJSON_AddStringToObject(request.pJsonBody, "room", pRoomIdStr) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.room)\n");
+			goto done;
+		}
+	} else if (cJSON_AddNumberToObject(request.pJsonBody, "room", roomId) == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create number (body.room)\n");
 		goto done;
 	}
 
@@ -571,18 +576,28 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 		if (pJsonRspErrorCode->valueint == 486) {
 			// its not a proper error if the room already exists
 			DEBUG(SWITCH_CHANNEL_LOG, "Room already exists\n");
-			result = roomId;
+			result = (pRoomIdStr && *pRoomIdStr != '\0') ? 1 : roomId;
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (error_code) - error=%d\n", pJsonRspErrorCode->valueint);
 			goto done;
 		}
 	} else if (!strcmp("created", pJsonRspResult->valuestring)) {
 	  pJsonRspRoomId = cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "room");
-	  if (!cJSON_IsNumber(pJsonRspRoomId) && (roomId != (janus_id_t) pJsonRspRoomId->valuedouble)) {
-	    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (plugindata.data.room)\n");
+	  if (!pJsonRspRoomId) {
+	    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (plugindata.data.room missing)\n");
 	    goto done;
 	  }
-	  result = roomId;
+	  if (cJSON_IsNumber(pJsonRspRoomId)) {
+	    if (pRoomIdStr && *pRoomIdStr != '\0')
+	      result = 1; /* string room: success */
+	    else
+	      result = (roomId != 0) ? roomId : (janus_id_t) pJsonRspRoomId->valuedouble;
+	  } else if (cJSON_IsString(pJsonRspRoomId)) {
+	    result = 1; /* string room (e.g. UUID) */
+	  } else {
+	    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (plugindata.data.room type)\n");
+	    goto done;
+	  }
 	} else {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (plugindata.data.audiobridge)\n");
 		goto done;
@@ -598,7 +613,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 }
 
 switch_status_t apiJoin(const char *pUrl, const char *pSecret,
-		const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId,
+		const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pRoomIdStr,
 		const char *pDisplay, const char *pPin, const char *pToken, const char *callId) {
 	message_t request, *pResponse = NULL;
  	switch_status_t result = SWITCH_STATUS_SUCCESS;
@@ -631,8 +646,14 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 		goto done;
 	}
 
-	if (cJSON_AddNumberToObject(request.pJsonBody, "room", roomId) == NULL) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.room)\n");
+	if (pRoomIdStr && *pRoomIdStr != '\0') {
+		if (cJSON_AddStringToObject(request.pJsonBody, "room", pRoomIdStr) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.room)\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	} else if (cJSON_AddNumberToObject(request.pJsonBody, "room", roomId) == NULL) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create number (body.room)\n");
 		result = SWITCH_STATUS_FALSE;
 		goto done;
 	}
