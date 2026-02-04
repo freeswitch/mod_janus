@@ -591,8 +591,10 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 	  }
 	  if (cJSON_IsNumber(pJsonRspRoomId)) {
 	    result = (janus_id_t) pJsonRspRoomId->valuedouble;
+		DEBUG(SWITCH_CHANNEL_LOG, "Create room success (integer room)\n");
 	  } else if (cJSON_IsString(pJsonRspRoomId)) {
-	    result = 1; /* string room: success; caller uses !apiCreateRoom() so must be non-zero */
+	    result = 1; /* string room: success; caller uses (apiCreateRoom() == 0) so must be non-zero */
+	    DEBUG(SWITCH_CHANNEL_LOG, "Create room success (string room)\n");
 	  } else {
 	    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (plugindata.data.room)\n");
 	    goto done;
