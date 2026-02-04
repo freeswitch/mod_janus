@@ -76,8 +76,8 @@ struct private_object {
 	switch_core_media_params_t mparams;
 
 	janus_id_t serverId;
-	janus_id_t roomId;       /* numeric room when pRoomIdStr is NULL */
-	char *pRoomIdStr;        /* string room (e.g. UUID) when Janus string_ids=true */
+	janus_id_t roomId;       /* numeric room id; 0 when using string room (pRoomIdStr) */
+	char *pRoomIdStr;        /* room as string (e.g. uuid); when set, when string_ids = true in janus.jcfg */
 	char *pDisplay;
 	janus_id_t senderId;
 	const char *callId;
@@ -624,11 +624,12 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	}
 
 	if (switch_channel_var_false(channel, "janus-use-existing-room")) {
-		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId, tech_pvt->pRoomIdStr,
+		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
 						switch_channel_get_variable(channel, "janus-room-description"),
 						switch_channel_var_true(channel, "janus-room-record"),
 						switch_channel_get_variable(channel, "janus-room-record-file"),
-						switch_channel_get_variable(channel, "janus-room-pin"))) {
+						switch_channel_get_variable(channel, "janus-room-pin"),
+						tech_pvt->pRoomIdStr)) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create room\n");
 			switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 			return SWITCH_STATUS_FALSE;
@@ -684,11 +685,11 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 				tech_pvt->serverId,
 				tech_pvt->senderId,
 				tech_pvt->roomId,
-				tech_pvt->pRoomIdStr,
 				tech_pvt->pDisplay,
 				switch_channel_get_variable(channel, "janus-room-pin"),
 				switch_channel_get_variable(channel, "janus-user-token"),
-				tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
+				tech_pvt->callId,
+				tech_pvt->pRoomIdStr) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to join room\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;
@@ -1119,7 +1120,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	*pNext++ = '\0';
 
 	tech_pvt->pDisplay = switch_core_session_strdup(*new_session, pCurr);
-	/* Room: store full string (supports UUID when Janus string_ids=true); strtoull would stop at first non-digit */
+	/* Room: store full string (supports UUID when Janus string_ids=true); numeric only when whole string is digits */
 	tech_pvt->pRoomIdStr = switch_core_session_strdup(*new_session, pNext);
 	{
 		char *end = NULL;

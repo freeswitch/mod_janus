@@ -38,8 +38,8 @@
 janus_id_t apiGetServerId(const char *pUrl, const char *pSecret);
 switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, const janus_id_t serverId);
 janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_t serverId, const char *callId);
-janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pRoomIdStr, const char *pDescription, switch_bool_t record, const char *pRecordingFile, const char *pPin);
-switch_status_t apiJoin(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pRoomIdStr, const char *pDisplay, const char *pPin, const char *pToken, const char *callId);
+janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDescription, switch_bool_t record, const char *pRecordingFile, const char *pPin, const char *pRoomIdStr);
+switch_status_t apiJoin(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDisplay, const char *pPin, const char *pToken, const char *callId, const char *pRoomIdStr);
 switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
 		const janus_id_t serverId, const janus_id_t senderId, const switch_bool_t muted,
 		switch_bool_t record, const char *pRecordingFile,
