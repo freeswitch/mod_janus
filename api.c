@@ -1118,16 +1118,16 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 
 				pJsonRspParticipantId = cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "id");
 				if (pJsonRspParticipantId) {
-					if (!cJSON_IsNumber(pJsonRspParticipantId)) {
+					if (cJSON_IsNumber(pJsonRspParticipantId)) {
+						participantId = (janus_id_t) pJsonRspParticipantId->valuedouble;
+						DEBUG(SWITCH_CHANNEL_LOG, "participantId=%" SWITCH_UINT64_T_FMT "\n", (janus_id_t) participantId);
+					} else if (cJSON_IsString(pJsonRspParticipantId)) {
+						participantId = 0; /* string participant id (e.g. UUID); callback does not use it for string ids */
+					} else {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (plugindata.data.id)\n");
 						goto endloop;
 					}
-					participantId = (janus_id_t) pJsonRspParticipantId->valuedouble;
-					DEBUG(SWITCH_CHANNEL_LOG, "participantId=%" SWITCH_UINT64_T_FMT "\n", (janus_id_t) participantId);
-
-
 					// call the relevant handler in mod_janus
-
 					if ((*pJoinedFunc)(pResponse->serverId, pResponse->senderId, roomId, participantId)) {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't join\n");
 					}
@@ -1165,11 +1165,14 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 						}
 					}
 				} else if ((pJsonRspType = cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "leaving")) != NULL) {
-					if (!cJSON_IsNumber(pJsonRspType)) {
+					if (cJSON_IsNumber(pJsonRspType)) {
+						DEBUG(SWITCH_CHANNEL_LOG, "leaving=%" SWITCH_UINT64_T_FMT "\n", (janus_id_t) pJsonRspType->valuedouble);
+					} else if (cJSON_IsString(pJsonRspType)) {
+						DEBUG(SWITCH_CHANNEL_LOG, "leaving=%s (string id)\n", pJsonRspType->valuestring);
+					} else {
 						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (plugindata.data.leaving)\n");
 						goto endloop;
 					}
-					DEBUG(SWITCH_CHANNEL_LOG, "leaving=%" SWITCH_UINT64_T_FMT "\n", (janus_id_t) pJsonRspType->valuedouble);
 				} else if ((pJsonRspErrorCode = cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "error_code")) != NULL
 							&& (pJsonRspError = cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "error")) != NULL) {
 					if (!cJSON_IsNumber(pJsonRspErrorCode) || !cJSON_IsString(pJsonRspError)) {
