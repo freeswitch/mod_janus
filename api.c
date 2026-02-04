@@ -578,7 +578,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 		if (pJsonRspErrorCode->valueint == 486) {
 			// its not a proper error if the room already exists
 			DEBUG(SWITCH_CHANNEL_LOG, "Room already exists\n");
-			result = (pRoomIdStr && *pRoomIdStr != '\0') ? 1 : roomId;
+			result = (pRoomIdStr && *pRoomIdStr) ? 1 : (roomId != 0 ? roomId : 1); /* never 0: caller uses !apiCreateRoom() */
 		} else {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (error_code) - error=%d\n", pJsonRspErrorCode->valueint);
 			goto done;
@@ -592,7 +592,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 	  if (cJSON_IsNumber(pJsonRspRoomId)) {
 	    result = (janus_id_t) pJsonRspRoomId->valuedouble;
 	  } else if (cJSON_IsString(pJsonRspRoomId)) {
-	    result = roomId; /* string room: keep caller's id (e.g. 0 when using room_string) */
+	    result = 1; /* string room: success; caller uses !apiCreateRoom() so must be non-zero */
 	  } else {
 	    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response (plugindata.data.room)\n");
 	    goto done;
