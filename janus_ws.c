@@ -27,6 +27,11 @@
 
 #define JANUS_WS_DEFAULT_RPC_US (15 * 1000000)
 
+/* Max time the pump holds io_mutex across kws_wait_sock before releasing it
+ * so RPC callers can interleave. 200 ms gives decent responsiveness while
+ * keeping syscall overhead negligible. */
+#define JANUS_WS_PUMP_SLICE_MS  200
+
 typedef struct janus_ws_deferred_s {
 	cJSON *root;
 	struct janus_ws_deferred_s *next;
@@ -380,33 +385,62 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 		}
 	}
 
-	switch_mutex_lock(ctx->io_mutex);
+	/*
+	 * Slice the long pump wait into short windows so that concurrent RPC
+	 * callers (attach, createroom, joinroom, hangup, ...) can acquire
+	 * ctx->io_mutex between slices. Holding the mutex across a full
+	 * wait_us (up to 60 s) would starve all outbound RPCs — exactly the
+	 * "attach queued but not sent until next pump iteration" symptom.
+	 *
+	 * Slice length is capped at JANUS_WS_PUMP_SLICE_MS. Between slices we
+	 * release the mutex, yield, and re-check. If data becomes available we
+	 * drain it and return promptly so the outer loop can decide what to do.
+	 */
+	{
+		switch_time_t deadline = switch_time_now() + wait_us;
+		for (;;) {
+			switch_interval_time_t remain = deadline - switch_time_now();
+			uint32_t slice_ms;
 
-	/* Dispatch anything buffered while an RPC was in flight. */
-	janus_ws_flush_deferred(ctx, &dispatch);
+			if (remain <= 0) {
+				return SWITCH_STATUS_SUCCESS;
+			}
+			slice_ms = (uint32_t) ((remain < (JANUS_WS_PUMP_SLICE_MS * 1000) ? remain : (JANUS_WS_PUMP_SLICE_MS * 1000)) / 1000);
+			if (slice_ms == 0) {
+				slice_ms = 1;
+			}
 
-	pr = kws_wait_sock(ctx->kws, (uint32_t) (wait_us / 1000), KS_POLL_READ);
-	if (pr < 0 || (pr & KS_POLL_INVALID) ||
-		((pr & (KS_POLL_ERROR | KS_POLL_HUP)) && !(pr & KS_POLL_READ))) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"janus_ws: pump poll failed pr=%d (0x%x) wait_ms=%u\n",
-			pr, (unsigned) pr, (unsigned) (wait_us / 1000));
-		switch_mutex_unlock(ctx->io_mutex);
-		return SWITCH_STATUS_FALSE;
-	}
-	if (pr & KS_POLL_READ) {
-		if (janus_ws_drain(ctx, &dispatch) != SWITCH_STATUS_SUCCESS) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "janus_ws: pump drain failed\n");
+			switch_mutex_lock(ctx->io_mutex);
+
+			janus_ws_flush_deferred(ctx, &dispatch);
+
+			pr = kws_wait_sock(ctx->kws, slice_ms, KS_POLL_READ);
+			if (pr < 0 || (pr & KS_POLL_INVALID) ||
+				((pr & (KS_POLL_ERROR | KS_POLL_HUP)) && !(pr & KS_POLL_READ))) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"janus_ws: pump poll failed pr=%d (0x%x) slice_ms=%u\n",
+					pr, (unsigned) pr, slice_ms);
+				switch_mutex_unlock(ctx->io_mutex);
+				return SWITCH_STATUS_FALSE;
+			}
+			if (pr & KS_POLL_READ) {
+				if (janus_ws_drain(ctx, &dispatch) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "janus_ws: pump drain failed\n");
+					switch_mutex_unlock(ctx->io_mutex);
+					return SWITCH_STATUS_FALSE;
+				}
+				if (last_activity_ref) {
+					*last_activity_ref = switch_time_now();
+				}
+				switch_mutex_unlock(ctx->io_mutex);
+				return SWITCH_STATUS_SUCCESS;
+			}
+
 			switch_mutex_unlock(ctx->io_mutex);
-			return SWITCH_STATUS_FALSE;
-		}
-		if (last_activity_ref) {
-			*last_activity_ref = switch_time_now();
+			/* Brief yield so any thread blocked on io_mutex wins the next round. */
+			switch_cond_next();
 		}
 	}
-
-	switch_mutex_unlock(ctx->io_mutex);
-	return SWITCH_STATUS_SUCCESS;
 }
 
 /* -------------------------------------------------------------------------- */
