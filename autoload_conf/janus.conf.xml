@@ -3,20 +3,8 @@
     <param name="debug" value="false"/>
   </settings>
 
-  <!--
-    Janus API URL (param name="url"):
-    - http://  or https://  — REST (long-poll events). Default transport; uses libcurl.
-    - ws://    or wss://    — WebSocket API (janus-protocol). Requires mod_janus built with libks
-      (libks2 or libks). Port and path must match your Janus WebSockets transport (often different
-      from the HTTP REST port). wss:// uses the system default CA store for TLS verification.
-    Other params are unchanged. auth-token is sent as a JSON "token" field on WebSocket requests
-    when set.
-  -->
   <server name="demo">
     <param name="url" value="https://janus.conf.meetecho.com/janus"/>
-    <!-- WebSocket example (uncomment and adjust host/port/path; build must link libks):
-    <param name="url" value="wss://janus.example.com:8989/"/>
-    -->
     <!-- <param name="secret" value="the-secret"/> -->
     <!-- <param name="auth-token" value="the-auth-token"/> -->
     <param name="enabled" value="true"/>
