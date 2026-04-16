@@ -41,6 +41,9 @@
 #include	"servers.h"
 #include	"api.h"
 #include	"hash.h"
+#if defined(HAVE_MOD_JANUS_WS)
+#include	"janus_ws.h"
+#endif
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_janus_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown);
@@ -193,8 +196,7 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Generated SDP=%s\n", tech_pvt->mparams.local_sdp_str);
 
-	if (apiConfigure(pServer->pUrl, 
-					pServer->pSecret, 
+	if (apiConfigure(pServer,
 					tech_pvt->serverId, 
 					tech_pvt->senderId,
 					switch_channel_var_true(channel, "janus-start-muted"),
@@ -424,9 +426,19 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 		// wait for a few seconds before re-connection
 		switch_yield(5000000);
 
+#if defined(HAVE_MOD_JANUS_WS)
+		if (pServer->transport == JANUS_TP_WS) {
+			janus_ws_server_close(pServer);
+			if (janus_ws_server_open(pServer) != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s WebSocket (re)connect failed\n", pServer->name);
+				continue;
+			}
+		}
+#endif
+
 		if (serverId) {
 			// the connection or Janus has restarted - try to re-use the same serverId
-			switch_status_t status =  apiClaimServerId(pServer->pUrl, pServer->pSecret, serverId);
+			switch_status_t status =  apiClaimServerId(pServer, serverId);
 			if (status == SWITCH_STATUS_SOCKERR) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s claim socket error - retry later\n", pServer->name);
 			} else if (status == SWITCH_STATUS_SUCCESS) {
@@ -460,7 +472,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 			}
 		} else {
 			// first time
-			serverId = apiGetServerId(pServer->pUrl, pServer->pSecret);
+			serverId = apiGetServerId(pServer);
 			if (!serverId) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Error getting serverId\n");
 			} else if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
@@ -474,11 +486,22 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 			}
 		}
 
+#if defined(HAVE_MOD_JANUS_WS)
+		if (pServer->transport == JANUS_TP_WS) {
+			pServer->ws_last_poll = switch_time_now();
+		}
+#endif
+
 		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Poll started, serverId: %ld\n", (long)serverId);
 
-			if (apiPoll(pServer->pUrl, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, trickle, answer_on_webrtcup, answered, hungup) != SWITCH_STATUS_SUCCESS) {
+			if (apiPoll(pServer, serverId, joined, accepted, trickle, answer_on_webrtcup, answered, hungup) != SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Poll failed, serverId: %ld\n", (long)serverId);
+#if defined(HAVE_MOD_JANUS_WS)
+				if (pServer->transport == JANUS_TP_WS) {
+					janus_ws_server_close(pServer);
+				}
+#endif
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server %ld from hash table\n", (long)serverId);
 				}
@@ -494,6 +517,12 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 	(void) hashDestroy(&pServer->senderIdLookup);
 
 	(void) hashDelete(&globals.serverIdLookup, serverId);
+
+#if defined(HAVE_MOD_JANUS_WS)
+	if (pServer->transport == JANUS_TP_WS) {
+		janus_ws_server_close(pServer);
+	}
+#endif
 
 	return NULL;
 }
@@ -606,7 +635,7 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	tech_pvt->senderId = apiGetSenderId(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->callId);
+	tech_pvt->senderId = apiGetSenderId(pServer, tech_pvt->serverId, tech_pvt->callId);
 	if (!tech_pvt->senderId) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error getting senderId\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
@@ -624,7 +653,7 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	}
 
 	if (switch_channel_var_false(channel, "janus-use-existing-room")) {
-		if (apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
+		if (apiCreateRoom(pServer, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
 						switch_channel_get_variable(channel, "janus-room-description"),
 						switch_channel_var_true(channel, "janus-room-record"),
 						switch_channel_get_variable(channel, "janus-room-record-file"),
@@ -680,8 +709,7 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 	}
 
 	if (apiJoin(
-				pServer->pUrl,
-				pServer->pSecret,
+				pServer,
 				tech_pvt->serverId,
 				tech_pvt->senderId,
 				tech_pvt->roomId,
@@ -788,12 +816,12 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	if (apiLeave(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
+	if (apiLeave(pServer, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to leave room\n");
 		// carry on regardless
 	}
 
-	if (apiDetach(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
+	if (apiDetach(pServer, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to detach\n");
 		// carry on regardless
 	}
@@ -1303,6 +1331,10 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown)
 	(void) hashDestroy(&globals.serverIdLookup);
 
 	(void) serversDestroy();
+
+#if defined(HAVE_MOD_JANUS_WS)
+	janus_ws_mod_global_shutdown();
+#endif
 
 	switch_curl_destroy();
 
