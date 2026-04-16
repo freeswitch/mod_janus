@@ -493,10 +493,28 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 #endif
 
 		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Poll started, serverId: %ld\n", (long)serverId);
+#if defined(HAVE_MOD_JANUS_WS)
+			if (pServer->transport == JANUS_TP_WS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+					"Janus WebSocket session pump started (session_id=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
+			} else
+#endif
+			{
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+					"Janus HTTP long-poll started (serverId=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
+			}
 
 			if (apiPoll(pServer, serverId, joined, accepted, trickle, answer_on_webrtcup, answered, hungup) != SWITCH_STATUS_SUCCESS) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Poll failed, serverId: %ld\n", (long)serverId);
+#if defined(HAVE_MOD_JANUS_WS)
+				if (pServer->transport == JANUS_TP_WS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						"Janus WebSocket session pump failed (session_id=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
+				} else
+#endif
+				{
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+						"Janus HTTP long-poll failed (serverId=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
+				}
 #if defined(HAVE_MOD_JANUS_WS)
 				if (pServer->transport == JANUS_TP_WS) {
 					janus_ws_server_close(pServer);
@@ -510,7 +528,16 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 				pServer->serverId = 0;
 				switch_mutex_unlock(pServer->mutex);
 			} else {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Poll completed, serverId: %ld\n", (long)serverId);
+#if defined(HAVE_MOD_JANUS_WS)
+				if (pServer->transport == JANUS_TP_WS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+						"Janus WebSocket session pump completed (session_id=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
+				} else
+#endif
+				{
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+						"Janus HTTP long-poll completed (serverId=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
+				}
 			}
 		}
 	}

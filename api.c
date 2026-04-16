@@ -289,6 +289,8 @@ switch_status_t api_dispatch_poll_event(cJSON *pEvent,
 
 	if (!strcmp(pResponse->pType, "keepalive")) {
 		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Its a keepalive - do nothing\n");
+	} else if (!strcmp(pResponse->pType, "ack")) {
+		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Janus ack (no-op)\n");
 	} else if (!strcmp(pResponse->pType, "hangup")) {
 		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Its an hangup\n");
 

@@ -390,10 +390,13 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 
 	pr = kws_wait_sock(ctx->kws, (uint32_t)(wait_us / 1000), KS_POLL_READ);
 	if (pr == KS_POLL_ERROR || pr < 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "janus_ws: kws_wait_sock failed pr=%d (wait_ms=%u)\n", pr,
+			(unsigned)(wait_us / 1000));
 		return SWITCH_STATUS_FALSE;
 	}
 	if (pr & KS_POLL_READ) {
 		if (janus_ws_drain_incoming_frames(ctx, server, pJoinedFunc, pAcceptedFunc, pTrickleFunc, pAnswerOnWebrtcupFunc, pAnsweredFunc, pHungupFunc) != SWITCH_STATUS_SUCCESS) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "janus_ws: drain after POLL_READ failed\n");
 			return SWITCH_STATUS_FALSE;
 		}
 		if (last_activity_ref) {
