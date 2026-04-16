@@ -189,10 +189,28 @@ static switch_status_t janus_ws_drain(janus_ws_ctx_t *ctx, const janus_ws_dispat
 	for (;;) {
 		kws_opcode_t oc = WSOC_INVALID;
 		uint8_t *data = NULL;
-		ks_ssize_t bytes = kws_read_frame(ctx->kws, &oc, &data);
+		ks_ssize_t bytes;
 		char *text;
 		cJSON *root;
 
+		/*
+		 * libks kws_read_frame blocks for WS_BLOCK (10 s) when the socket is
+		 * idle, and on timeout it returns -1 AND closes the underlying socket
+		 * (via kws_close). To stay non-blocking, peek with a 0 ms poll first
+		 * and only call kws_read_frame when we know data is ready. This also
+		 * picks up kws->unprocessed_buffer_len / SSL_pending via kws_wait_sock.
+		 */
+		{
+			int pr = kws_wait_sock(ctx->kws, 0, KS_POLL_READ);
+			if (pr < 0 || (pr & KS_POLL_INVALID) || ((pr & KS_POLL_ERROR) && !(pr & KS_POLL_READ))) {
+				return SWITCH_STATUS_FALSE;
+			}
+			if (!(pr & KS_POLL_READ)) {
+				return SWITCH_STATUS_SUCCESS;
+			}
+		}
+
+		bytes = kws_read_frame(ctx->kws, &oc, &data);
 		if (bytes < 0) {
 			return SWITCH_STATUS_FALSE;
 		}
