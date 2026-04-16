@@ -431,10 +431,14 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 		outer_reconnect_delay = 1;
 
 #if defined(HAVE_MOD_JANUS_WS)
-		if (pServer->transport == JANUS_TP_WS) {
-			janus_ws_server_close(pServer);
+		/*
+		 * One persistent WebSocket per server: open only when there is no handle.
+		 * Session recovery uses Janus "claim" (and keepalives inside the pump), not TCP churn.
+		 * Close the socket only on transport-level failure (see claim SOCKERR / create failure below).
+		 */
+		if (pServer->transport == JANUS_TP_WS && !pServer->janus_ws_handle) {
 			if (janus_ws_server_open(pServer) != SWITCH_STATUS_SUCCESS) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s WebSocket (re)connect failed\n", pServer->name);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s WebSocket connect failed\n", pServer->name);
 				continue;
 			}
 		}
@@ -444,7 +448,12 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 			// the connection or Janus has restarted - try to re-use the same serverId
 			switch_status_t status =  apiClaimServerId(pServer, serverId);
 			if (status == SWITCH_STATUS_SOCKERR) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s claim socket error - retry later\n", pServer->name);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s claim socket error - closing WebSocket, will reconnect\n", pServer->name);
+#if defined(HAVE_MOD_JANUS_WS)
+				if (pServer->transport == JANUS_TP_WS && pServer->janus_ws_handle) {
+					janus_ws_server_close(pServer);
+				}
+#endif
 			} else if (status == SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Server=%s claim success - serverId=%" SWITCH_UINT64_T_FMT "\n", pServer->name, serverId);
 				switch_mutex_lock(pServer->mutex);
@@ -479,10 +488,16 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 				serverId = 0;
 			}
 		} else {
-			// first time
+			// first time (or new session after claim loss)
 			serverId = apiGetServerId(pServer);
 			if (!serverId) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Error getting serverId\n");
+#if defined(HAVE_MOD_JANUS_WS)
+				/* Stale transport after Janus restart etc.: drop TCP so next loop opens a clean socket. */
+				if (pServer->transport == JANUS_TP_WS && pServer->janus_ws_handle) {
+					janus_ws_server_close(pServer);
+				}
+#endif
 			} else {
 				switch_mutex_lock(pServer->mutex);
 				pServer->started = switch_time_now();
@@ -521,18 +536,14 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 #if defined(HAVE_MOD_JANUS_WS)
 				if (pServer->transport == JANUS_TP_WS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-						"Janus WebSocket session pump failed (session_id=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
+						"Janus WebSocket session failed (session_id=%" SWITCH_UINT64_T_FMT "); will re-register on same socket\n",
+						(janus_id_t)serverId);
 				} else
 #endif
 				{
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 						"Janus HTTP long-poll failed (serverId=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
 				}
-#if defined(HAVE_MOD_JANUS_WS)
-				if (pServer->transport == JANUS_TP_WS) {
-					janus_ws_server_close(pServer);
-				}
-#endif
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server %ld from hash table\n", (long)serverId);
 				}
