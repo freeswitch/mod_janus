@@ -412,6 +412,16 @@ switch_status_t hungup(janus_id_t serverId, janus_id_t senderId, const char *pRe
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* Human-readable transport label for log lines. */
+static const char *transport_name(const server_t *pServer) {
+#if defined(HAVE_MOD_JANUS_WS)
+	return (pServer && pServer->transport == JANUS_TP_WS) ? "WebSocket session" : "HTTP long-poll";
+#else
+	(void) pServer;
+	return "HTTP long-poll";
+#endif
+}
+
 static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void *pObj) {
 	server_t *pServer = (server_t *) pObj;
 	janus_id_t serverId = 0;
@@ -521,29 +531,12 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 #endif
 
 		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
-#if defined(HAVE_MOD_JANUS_WS)
-			if (pServer->transport == JANUS_TP_WS) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-					"Janus WebSocket session pump started (session_id=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
-			} else
-#endif
-			{
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-					"Janus HTTP long-poll started (serverId=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
-			}
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+				"Janus %s started (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 
 			if (apiPoll(pServer, serverId, joined, accepted, trickle, answer_on_webrtcup, answered, hungup) != SWITCH_STATUS_SUCCESS) {
-#if defined(HAVE_MOD_JANUS_WS)
-				if (pServer->transport == JANUS_TP_WS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-						"Janus WebSocket session failed (session_id=%" SWITCH_UINT64_T_FMT "); will re-register on same socket\n",
-						(janus_id_t)serverId);
-				} else
-#endif
-				{
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-						"Janus HTTP long-poll failed (serverId=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
-				}
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"Janus %s failed (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server %ld from hash table\n", (long)serverId);
 				}
@@ -552,16 +545,8 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 				pServer->serverId = 0;
 				switch_mutex_unlock(pServer->mutex);
 			} else {
-#if defined(HAVE_MOD_JANUS_WS)
-				if (pServer->transport == JANUS_TP_WS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-						"Janus WebSocket session pump completed (session_id=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
-				} else
-#endif
-				{
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-						"Janus HTTP long-poll completed (serverId=%" SWITCH_UINT64_T_FMT ")\n", (janus_id_t)serverId);
-				}
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+					"Janus %s completed (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 			}
 		}
 	}

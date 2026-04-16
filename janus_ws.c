@@ -397,15 +397,18 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 	 * drain it and return promptly so the outer loop can decide what to do.
 	 */
 	{
-		switch_time_t deadline = switch_time_now() + wait_us;
+		const switch_time_t deadline = switch_time_now() + wait_us;
 		for (;;) {
-			switch_interval_time_t remain = deadline - switch_time_now();
+			const switch_interval_time_t remain_us = deadline - switch_time_now();
 			uint32_t slice_ms;
 
-			if (remain <= 0) {
+			if (remain_us <= 0) {
 				return SWITCH_STATUS_SUCCESS;
 			}
-			slice_ms = (uint32_t) ((remain < (JANUS_WS_PUMP_SLICE_MS * 1000) ? remain : (JANUS_WS_PUMP_SLICE_MS * 1000)) / 1000);
+			/* Clamp: never hold io_mutex longer than JANUS_WS_PUMP_SLICE_MS. */
+			slice_ms = (remain_us < (JANUS_WS_PUMP_SLICE_MS * 1000))
+				? (uint32_t) (remain_us / 1000)
+				: JANUS_WS_PUMP_SLICE_MS;
 			if (slice_ms == 0) {
 				slice_ms = 1;
 			}
