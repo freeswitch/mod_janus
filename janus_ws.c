@@ -37,6 +37,13 @@ typedef struct {
 	switch_memory_pool_t *pool;
 } janus_ws_ctx_t;
 
+static void janus_ws_dbg_ws_json(const char *dir, const char *json)
+{
+	if (json && *json) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "janus_ws %s %s\n", dir, json);
+	}
+}
+
 static switch_mutex_t *g_libks_ref_mutex = NULL;
 static int g_libks_refs = 0;
 
@@ -175,6 +182,7 @@ static switch_status_t janus_ws_drain_readable_frames_rpc_only(janus_ws_ctx_t *c
 		}
 		memcpy(text, data, (size_t)bytes);
 		text[bytes] = '\0';
+		janus_ws_dbg_ws_json("recv", text);
 		root = cJSON_Parse(text);
 		free(text);
 		if (!root) {
@@ -220,6 +228,7 @@ cJSON *janus_ws_rpc_json(server_t *server, cJSON *request, const char *transacti
 	if (!payload) {
 		goto fail_waiter;
 	}
+	janus_ws_dbg_ws_json("send", payload);
 
 	switch_mutex_lock(ctx->write_mutex);
 	wsz = kws_write_frame(ctx->kws, WSOC_TEXT, payload, (ks_size_t)strlen(payload));
@@ -330,6 +339,7 @@ static switch_status_t janus_ws_drain_incoming_frames(janus_ws_ctx_t *ctx, serve
 		}
 		memcpy(text, data, (size_t)bytes);
 		text[bytes] = '\0';
+		janus_ws_dbg_ws_json("recv", text);
 		janus_ws_process_json_text(ctx, server, text, pJoinedFunc, pAcceptedFunc, pTrickleFunc, pAnswerOnWebrtcupFunc, pAnsweredFunc, pHungupFunc);
 		free(text);
 	}
