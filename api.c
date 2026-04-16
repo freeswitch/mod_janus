@@ -60,6 +60,65 @@ static void api_ws_add_token(cJSON *root, server_t *s)
 }
 #endif
 
+/*
+ * URL flavour for HTTP transport. WS transport ignores this and adds the
+ * session_id / handle_id into the JSON body instead.
+ */
+typedef enum {
+	URL_ROOT,    /* pUrl                            (create)              */
+	URL_SESSION, /* pUrl/<serverId>                 (claim, attach)       */
+	URL_HANDLE   /* pUrl/<serverId>/<senderId>      (everything handle)   */
+} api_url_kind_t;
+
+/*
+ * Send one Janus request through the transport configured on pServer.
+ *   - WS: adds session_id/handle_id/token to the request body and calls
+ *         janus_ws_rpc_json with HTTP_POST_TIMEOUT-equivalent timeout.
+ *   - HTTP: builds URL per `kind` and calls httpPost(HTTP_POST_TIMEOUT).
+ *
+ * Caller retains ownership of `pJsonRequest` and must cJSON_Delete() the
+ * returned response (or NULL on error).
+ */
+static cJSON *api_send_request(server_t *pServer, cJSON *pJsonRequest, const char *pTransactionId,
+	janus_id_t serverId, janus_id_t senderId, api_url_kind_t kind, const char *label)
+{
+#if defined(HAVE_MOD_JANUS_WS)
+	if (pServer->transport == JANUS_TP_WS) {
+		if (serverId) cJSON_AddNumberToObject(pJsonRequest, "session_id", (double) serverId);
+		if (senderId) cJSON_AddNumberToObject(pJsonRequest, "handle_id", (double) senderId);
+		api_ws_add_token(pJsonRequest, pServer);
+		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket %s\n", label);
+		return janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId,
+			(switch_interval_time_t) HTTP_POST_TIMEOUT * 1000);
+	}
+#else
+	(void) pTransactionId;
+#endif
+	{
+		char url[1024];
+		int n;
+		switch (kind) {
+		case URL_ROOT:
+			n = snprintf(url, sizeof(url), "%s", pServer->pUrl);
+			break;
+		case URL_SESSION:
+			n = snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT, pServer->pUrl, serverId);
+			break;
+		case URL_HANDLE:
+		default:
+			n = snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT,
+				pServer->pUrl, serverId, senderId);
+			break;
+		}
+		if (n < 0 || (size_t) n >= sizeof(url)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
+			return NULL;
+		}
+		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP %s - url=%s\n", label, url);
+		return httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+	}
+}
+
 typedef struct {
 	const char *pType;
 	janus_id_t serverId;
@@ -457,17 +516,7 @@ janus_id_t apiGetServerId(server_t *pServer) {
 		goto done;
 	}
 
-#if defined(HAVE_MOD_JANUS_WS)
-	if (pServer->transport == JANUS_TP_WS) {
-		api_ws_add_token(pJsonRequest, pServer);
-		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket create\n");
-		pJsonResponse = janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId, (switch_interval_time_t)HTTP_POST_TIMEOUT * 1000);
-	} else
-#endif
-	{
-	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-	pJsonResponse = httpPost(pServer->pUrl, HTTP_POST_TIMEOUT, pJsonRequest);
-	}
+	pJsonResponse = api_send_request(pServer, pJsonRequest, pTransactionId, 0, 0, URL_ROOT, "create");
 
 	if (!(pResponse = decode(pJsonResponse))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -507,7 +556,6 @@ switch_status_t apiClaimServerId(server_t *pServer, janus_id_t serverId) {
 	cJSON *pJsonRspErrorCode;
 	cJSON *pJsonRspErrorReason;
 	char *pTransactionId = generateTransactionId();
-	char url[1024];
 
 	switch_assert(pServer);
 	switch_assert(pServer->pUrl);
@@ -525,24 +573,7 @@ switch_status_t apiClaimServerId(server_t *pServer, janus_id_t serverId) {
 		goto done;
 	}
 
-#if defined(HAVE_MOD_JANUS_WS)
-	if (pServer->transport == JANUS_TP_WS) {
-		cJSON_AddNumberToObject(pJsonRequest, "session_id", (double)serverId);
-		api_ws_add_token(pJsonRequest, pServer);
-		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket claim\n");
-		pJsonResponse = janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId, (switch_interval_time_t)HTTP_POST_TIMEOUT * 1000);
-	} else
-#endif
-	{
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT, pServer->pUrl, serverId) < 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
-			result = SWITCH_STATUS_FALSE;
-		goto done;
-	}
-
-	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-    pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
-	}
+	pJsonResponse = api_send_request(pServer, pJsonRequest, pTransactionId, serverId, 0, URL_SESSION, "claim");
 
 	if (!(pResponse = decode(pJsonResponse))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -608,7 +639,6 @@ janus_id_t apiGetSenderId(server_t *pServer, const janus_id_t serverId, const ch
 	cJSON *pJsonResponse = NULL;
 	cJSON *pJsonRspId;
 	char *pTransactionId = generateTransactionId();
-	char url[1024];
 
 	switch_assert(pServer);
 	switch_assert(pServer->pUrl);
@@ -631,24 +661,7 @@ janus_id_t apiGetSenderId(server_t *pServer, const janus_id_t serverId, const ch
 		goto done;
 	}
 
-#if defined(HAVE_MOD_JANUS_WS)
-	if (pServer->transport == JANUS_TP_WS) {
-		cJSON_AddNumberToObject(pJsonRequest, "session_id", (double)serverId);
-		api_ws_add_token(pJsonRequest, pServer);
-		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket attach\n");
-		pJsonResponse = janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId, (switch_interval_time_t)HTTP_POST_TIMEOUT * 1000);
-	} else
-#endif
-	{
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT, pServer->pUrl, serverId) < 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
-		goto done;
-	}
-
-	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-	//	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
-	pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
-	}
+	pJsonResponse = api_send_request(pServer, pJsonRequest, pTransactionId, serverId, 0, URL_SESSION, "attach");
 
 	if (!(pResponse = decode(pJsonResponse))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -689,7 +702,6 @@ janus_id_t apiCreateRoom(server_t *pServer, const janus_id_t serverId,
 	cJSON *pJsonRspErrorCode;
 	cJSON *pJsonRspRoomId;
 	char *pTransactionId = generateTransactionId();
-	char url[1024];
 
 	switch_assert(pServer);
 	switch_assert(pServer->pUrl);
@@ -756,25 +768,7 @@ janus_id_t apiCreateRoom(server_t *pServer, const janus_id_t serverId,
 		goto done;
 	}
 
-#if defined(HAVE_MOD_JANUS_WS)
-	if (pServer->transport == JANUS_TP_WS) {
-		cJSON_AddNumberToObject(pJsonRequest, "session_id", (double)serverId);
-		cJSON_AddNumberToObject(pJsonRequest, "handle_id", (double)senderId);
-		api_ws_add_token(pJsonRequest, pServer);
-		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket create room\n");
-		pJsonResponse = janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId, (switch_interval_time_t)HTTP_POST_TIMEOUT * 1000);
-	} else
-#endif
-	{
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pServer->pUrl, serverId, senderId) < 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
-		goto done;
-	}
-
-	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-	//	http_get("https://curl.haxx.se/libcurl/c/CURLOPT_HEADERFUNCTION.html", session);
-	pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
-	}
+	pJsonResponse = api_send_request(pServer, pJsonRequest, pTransactionId, serverId, senderId, URL_HANDLE, "create room");
 
 	if (!(pResponse = decode(pJsonResponse))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -848,7 +842,6 @@ switch_status_t apiJoin(server_t *pServer,
   	cJSON *pJsonRequest = NULL;
   	cJSON *pJsonResponse = NULL;
 	char *pTransactionId = generateTransactionId();
-  	char url[1024];
 
 	switch_assert(pServer);
 	switch_assert(pServer->pUrl);
@@ -926,25 +919,7 @@ switch_status_t apiJoin(server_t *pServer,
 		goto done;
 	}
 
-#if defined(HAVE_MOD_JANUS_WS)
-	if (pServer->transport == JANUS_TP_WS) {
-		cJSON_AddNumberToObject(pJsonRequest, "session_id", (double)serverId);
-		cJSON_AddNumberToObject(pJsonRequest, "handle_id", (double)senderId);
-		api_ws_add_token(pJsonRequest, pServer);
-		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket join\n");
-		pJsonResponse = janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId, (switch_interval_time_t)HTTP_POST_TIMEOUT * 1000);
-	} else
-#endif
-	{
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pServer->pUrl, serverId, senderId) < 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
-		result = SWITCH_STATUS_FALSE;
-		goto done;
-	}
-
-	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  	pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
-	}
+	pJsonResponse = api_send_request(pServer, pJsonRequest, pTransactionId, serverId, senderId, URL_HANDLE, "join");
 
 	if (!(pResponse = decode(pJsonResponse))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -978,7 +953,6 @@ switch_status_t apiConfigure(server_t *pServer,
   	cJSON *pJsonRequest = NULL;
 	cJSON *pJsonResponse = NULL;
 	char *pTransactionId = generateTransactionId();
-  	char url[1024];
 
 	switch_assert(pServer);
 	switch_assert(pServer->pUrl);
@@ -1066,25 +1040,7 @@ switch_status_t apiConfigure(server_t *pServer,
     	goto done;
   	}
 
-#if defined(HAVE_MOD_JANUS_WS)
-	if (pServer->transport == JANUS_TP_WS) {
-		cJSON_AddNumberToObject(pJsonRequest, "session_id", (double)serverId);
-		cJSON_AddNumberToObject(pJsonRequest, "handle_id", (double)senderId);
-		api_ws_add_token(pJsonRequest, pServer);
-		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket configure\n");
-		pJsonResponse = janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId, (switch_interval_time_t)HTTP_POST_TIMEOUT * 1000);
-	} else
-#endif
-	{
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pServer->pUrl, serverId, senderId) < 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
-		result = SWITCH_STATUS_FALSE;
-		goto done;
-	}
-
-	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  	pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
-	}
+	pJsonResponse = api_send_request(pServer, pJsonRequest, pTransactionId, serverId, senderId, URL_HANDLE, "configure");
 
 	if (!(pResponse = decode(pJsonResponse))) {
     	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -1115,7 +1071,6 @@ switch_status_t apiLeave(server_t *pServer, const janus_id_t serverId, const jan
   	cJSON *pJsonRequest = NULL;
 	cJSON *pJsonResponse = NULL;
 	char *pTransactionId = generateTransactionId();
-  	char url[1024];
 
 	switch_assert(pServer);
 	switch_assert(pServer->pUrl);
@@ -1154,25 +1109,7 @@ switch_status_t apiLeave(server_t *pServer, const janus_id_t serverId, const jan
 		goto done;
 	}
 
-#if defined(HAVE_MOD_JANUS_WS)
-	if (pServer->transport == JANUS_TP_WS) {
-		cJSON_AddNumberToObject(pJsonRequest, "session_id", (double)serverId);
-		cJSON_AddNumberToObject(pJsonRequest, "handle_id", (double)senderId);
-		api_ws_add_token(pJsonRequest, pServer);
-		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket leave\n");
-		pJsonResponse = janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId, (switch_interval_time_t)HTTP_POST_TIMEOUT * 1000);
-	} else
-#endif
-	{
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pServer->pUrl, serverId, senderId) < 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
-		result = SWITCH_STATUS_FALSE;
-		goto done;
-	}
-
-	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  	pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
-	}
+	pJsonResponse = api_send_request(pServer, pJsonRequest, pTransactionId, serverId, senderId, URL_HANDLE, "leave");
 
 	if (!(pResponse = decode(pJsonResponse))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
@@ -1203,7 +1140,6 @@ switch_status_t apiDetach(server_t *pServer, const janus_id_t serverId, const ja
   	cJSON *pJsonRequest = NULL;
 	cJSON *pJsonResponse = NULL;
 	char *pTransactionId = generateTransactionId();
-  	char url[1024];
 
 	switch_assert(pServer);
 	switch_assert(pServer->pUrl);
@@ -1220,25 +1156,7 @@ switch_status_t apiDetach(server_t *pServer, const janus_id_t serverId, const ja
 		goto done;
 	}
 
-#if defined(HAVE_MOD_JANUS_WS)
-	if (pServer->transport == JANUS_TP_WS) {
-		cJSON_AddNumberToObject(pJsonRequest, "session_id", (double)serverId);
-		cJSON_AddNumberToObject(pJsonRequest, "handle_id", (double)senderId);
-		api_ws_add_token(pJsonRequest, pServer);
-		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket detach\n");
-		pJsonResponse = janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId, (switch_interval_time_t)HTTP_POST_TIMEOUT * 1000);
-	} else
-#endif
-	{
-	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pServer->pUrl, serverId, senderId) < 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
-		result = SWITCH_STATUS_FALSE;
-		goto done;
-	}
-	
-	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request\n");
-  	pJsonResponse = httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
-	}
+	pJsonResponse = api_send_request(pServer, pJsonRequest, pTransactionId, serverId, senderId, URL_HANDLE, "detach");
 
 	if (!(pResponse = decode(pJsonResponse))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
