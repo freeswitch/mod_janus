@@ -87,6 +87,43 @@ static janus_ws_ctx_t *janus_ws_ctx_get(server_t *server)
 	return (janus_ws_ctx_t *) server->janus_ws_handle;
 }
 
+/* Match success/ack/error for an outstanding sync RPC waiter; takes ownership of root on SWITCH_TRUE. */
+static switch_bool_t janus_ws_try_consume_rpc_reply(janus_ws_ctx_t *ctx, cJSON *root)
+{
+	cJSON *janus_type = cJSON_GetObjectItemCaseSensitive(root, "janus");
+	cJSON *txn = cJSON_GetObjectItemCaseSensitive(root, "transaction");
+	const char *tx = NULL;
+	const char *jt = NULL;
+
+	if (!txn || !cJSON_IsString(txn) || !janus_type || !cJSON_IsString(janus_type)) {
+		return SWITCH_FALSE;
+	}
+	tx = txn->valuestring;
+	jt = janus_type->valuestring;
+
+	if (strcmp(jt, "success") && strcmp(jt, "ack") && strcmp(jt, "error")) {
+		return SWITCH_FALSE;
+	}
+
+	switch_mutex_lock(ctx->pending_mutex);
+	{
+		janus_ws_pending_rpc_t *pending = (janus_ws_pending_rpc_t *) switch_core_hash_find(ctx->pending, tx);
+		if (pending) {
+			switch_core_hash_delete(ctx->pending, tx);
+			switch_mutex_unlock(ctx->pending_mutex);
+
+			switch_mutex_lock(pending->mutex);
+			pending->result = root;
+			pending->done = 1;
+			switch_thread_cond_signal(pending->cond);
+			switch_mutex_unlock(pending->mutex);
+			return SWITCH_TRUE;
+		}
+	}
+	switch_mutex_unlock(ctx->pending_mutex);
+	return SWITCH_FALSE;
+}
+
 static switch_status_t janus_ws_process_json_text(janus_ws_ctx_t *ctx, server_t *server, const char *text,
 	switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
 	switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
@@ -96,10 +133,6 @@ static switch_status_t janus_ws_process_json_text(janus_ws_ctx_t *ctx, server_t 
 	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason))
 {
 	cJSON *root = cJSON_Parse(text);
-	cJSON *janus_type;
-	cJSON *txn;
-	const char *jt;
-	const char *tx = NULL;
 
 	(void) server;
 
@@ -108,36 +141,50 @@ static switch_status_t janus_ws_process_json_text(janus_ws_ctx_t *ctx, server_t 
 		return SWITCH_STATUS_FALSE;
 	}
 
-	janus_type = cJSON_GetObjectItemCaseSensitive(root, "janus");
-	txn = cJSON_GetObjectItemCaseSensitive(root, "transaction");
-	if (txn && cJSON_IsString(txn)) {
-		tx = txn->valuestring;
-	}
-
-	if (tx && janus_type && cJSON_IsString(janus_type)) {
-		jt = janus_type->valuestring;
-		if (!strcmp(jt, "success") || !strcmp(jt, "ack") || !strcmp(jt, "error")) {
-			janus_ws_pending_rpc_t *pending = NULL;
-			switch_mutex_lock(ctx->pending_mutex);
-			pending = (janus_ws_pending_rpc_t *) switch_core_hash_find(ctx->pending, tx);
-			if (pending) {
-				switch_core_hash_delete(ctx->pending, tx);
-				switch_mutex_unlock(ctx->pending_mutex);
-
-				switch_mutex_lock(pending->mutex);
-				pending->result = root;
-				pending->done = 1;
-				switch_thread_cond_signal(pending->cond);
-				switch_mutex_unlock(pending->mutex);
-				return SWITCH_STATUS_SUCCESS;
-			}
-			switch_mutex_unlock(ctx->pending_mutex);
-		}
+	if (janus_ws_try_consume_rpc_reply(ctx, root)) {
+		return SWITCH_STATUS_SUCCESS;
 	}
 
 	(void) api_dispatch_poll_event(root, pJoinedFunc, pAcceptedFunc, pTrickleFunc, pAnswerOnWebrtcupFunc, pAnsweredFunc, pHungupFunc);
 	cJSON_Delete(root);
 	return SWITCH_STATUS_SUCCESS;
+}
+
+/* Read all currently queued WS text frames and satisfy sync RPC waiters only (used while janus_ws_rpc_json blocks). */
+static switch_status_t janus_ws_drain_readable_frames_rpc_only(janus_ws_ctx_t *ctx)
+{
+	for (;;) {
+		kws_opcode_t oc = WSOC_INVALID;
+		uint8_t *data = NULL;
+		ks_ssize_t bytes = kws_read_frame(ctx->kws, &oc, &data);
+		char *text = NULL;
+		cJSON *root;
+
+		if (bytes < 0) {
+			return SWITCH_STATUS_FALSE;
+		}
+		if (bytes == 0) {
+			return SWITCH_STATUS_SUCCESS;
+		}
+		if (oc != WSOC_TEXT) {
+			continue;
+		}
+		text = (char *) malloc((size_t)bytes + 1);
+		if (!text) {
+			return SWITCH_STATUS_FALSE;
+		}
+		memcpy(text, data, (size_t)bytes);
+		text[bytes] = '\0';
+		root = cJSON_Parse(text);
+		free(text);
+		if (!root) {
+			continue;
+		}
+		if (!janus_ws_try_consume_rpc_reply(ctx, root)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "janus_ws: non-RPC message during sync RPC wait; dropping\n");
+			cJSON_Delete(root);
+		}
+	}
 }
 
 cJSON *janus_ws_rpc_json(server_t *server, cJSON *request, const char *transaction, switch_interval_time_t timeout_us)
@@ -149,7 +196,6 @@ cJSON *janus_ws_rpc_json(server_t *server, cJSON *request, const char *transacti
 	ks_ssize_t wsz;
 	cJSON *out = NULL;
 	switch_interval_time_t wait_step = 100000;
-	switch_interval_time_t waited = 0;
 
 	if (!ctx || !ctx->kws || !request || !transaction) {
 		return NULL;
@@ -186,21 +232,53 @@ cJSON *janus_ws_rpc_json(server_t *server, cJSON *request, const char *transacti
 		goto fail_waiter;
 	}
 
-	switch_mutex_lock(pending->mutex);
-	while (!pending->done && waited < timeout_us) {
-		switch_status_t wst = switch_thread_cond_timedwait(pending->cond, pending->mutex, wait_step);
-		if (wst == SWITCH_STATUS_TIMEOUT) {
-			waited += wait_step;
+	/*
+	 * Must read the WebSocket while waiting: Janus replies on the same connection.
+	 * cond_wait alone never runs kws_read_frame, so the peer's success/ack never reached try_consume_rpc_reply.
+	 */
+	{
+		switch_time_t deadline = switch_time_now() + timeout_us;
+		switch_mutex_lock(pending->mutex);
+		while (!pending->done && switch_time_now() < deadline) {
+			switch_interval_time_t remaining = (switch_interval_time_t)(deadline - switch_time_now());
+			switch_interval_time_t slice = wait_step;
+
+			if (remaining <= 0) {
+				break;
+			}
+			if (remaining < slice) {
+				slice = remaining;
+			}
+
+			switch_mutex_unlock(pending->mutex);
+
+			{
+				int pr = kws_wait_sock(ctx->kws, (uint32_t)(slice / 1000), KS_POLL_READ);
+				if (pr == KS_POLL_ERROR || pr < 0) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "janus_ws: socket error waiting for RPC reply\n");
+					switch_mutex_lock(pending->mutex);
+					break;
+				}
+				if (pr & KS_POLL_READ) {
+					if (janus_ws_drain_readable_frames_rpc_only(ctx) != SWITCH_STATUS_SUCCESS) {
+						switch_mutex_lock(pending->mutex);
+						break;
+					}
+				}
+			}
+
+			switch_mutex_lock(pending->mutex);
 		}
-	}
-	if (!pending->done) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "janus_ws: RPC timeout transaction=%s\n", transaction);
+
+		if (!pending->done) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "janus_ws: RPC timeout transaction=%s\n", transaction);
+			switch_mutex_unlock(pending->mutex);
+			goto fail_waiter;
+		}
+		out = pending->result;
+		pending->result = NULL;
 		switch_mutex_unlock(pending->mutex);
-		goto fail_waiter;
 	}
-	out = pending->result;
-	pending->result = NULL;
-	switch_mutex_unlock(pending->mutex);
 
 	switch_mutex_destroy(pending->mutex);
 	switch_thread_cond_destroy(pending->cond);
