@@ -24,7 +24,7 @@ typedef struct janus_ws_pending_rpc {
 	switch_thread_cond_t *cond;
 	int done;
 	cJSON *result;
-	switch_memory_pool_t *pool;
+	switch_memory_pool_t *pool; /* subpool: destroy frees this struct */
 } janus_ws_pending_rpc_t;
 
 typedef struct {
@@ -144,6 +144,7 @@ cJSON *janus_ws_rpc_json(server_t *server, cJSON *request, const char *transacti
 {
 	janus_ws_ctx_t *ctx = janus_ws_ctx_get(server);
 	janus_ws_pending_rpc_t *pending = NULL;
+	switch_memory_pool_t *pend_pool = NULL;
 	char *payload = NULL;
 	ks_ssize_t wsz;
 	cJSON *out = NULL;
@@ -154,10 +155,13 @@ cJSON *janus_ws_rpc_json(server_t *server, cJSON *request, const char *transacti
 		return NULL;
 	}
 
-	pending = switch_core_alloc(ctx->pool, sizeof(*pending));
-	switch_mutex_init(&pending->mutex, SWITCH_MUTEX_NESTED, ctx->pool);
-	switch_thread_cond_create(&pending->cond, ctx->pool);
-	pending->pool = ctx->pool;
+	if (switch_core_new_memory_pool(&pend_pool) != SWITCH_STATUS_SUCCESS) {
+		return NULL;
+	}
+	pending = switch_core_alloc(pend_pool, sizeof(*pending));
+	switch_mutex_init(&pending->mutex, SWITCH_MUTEX_NESTED, pend_pool);
+	switch_thread_cond_create(&pending->cond, pend_pool);
+	pending->pool = pend_pool;
 	pending->done = 0;
 	pending->result = NULL;
 	switch_copy_string(pending->transaction, transaction, sizeof(pending->transaction));
@@ -200,7 +204,7 @@ cJSON *janus_ws_rpc_json(server_t *server, cJSON *request, const char *transacti
 
 	switch_mutex_destroy(pending->mutex);
 	switch_thread_cond_destroy(pending->cond);
-	switch_core_free(ctx->pool, pending);
+	switch_core_destroy_memory_pool(&pend_pool);
 	return out;
 
 fail_waiter:
@@ -215,7 +219,7 @@ fail_waiter:
 	switch_mutex_unlock(pending->mutex);
 	switch_mutex_destroy(pending->mutex);
 	switch_thread_cond_destroy(pending->cond);
-	switch_core_free(ctx->pool, pending);
+	switch_core_destroy_memory_pool(&pend_pool);
 	return NULL;
 }
 
@@ -315,6 +319,7 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 switch_status_t janus_ws_server_open(server_t *server)
 {
 	janus_ws_ctx_t *ctx = NULL;
+	switch_memory_pool_t *ctx_pool = NULL;
 	ks_json_t *params = NULL;
 	ks_status_t kst;
 
@@ -324,9 +329,13 @@ switch_status_t janus_ws_server_open(server_t *server)
 
 	janus_ws_libks_acquire(globals.pModulePool);
 
-	ctx = switch_core_alloc(globals.pModulePool, sizeof(*ctx));
+	if (switch_core_new_memory_pool(&ctx_pool) != SWITCH_STATUS_SUCCESS) {
+		janus_ws_libks_release();
+		return SWITCH_STATUS_FALSE;
+	}
+	ctx = switch_core_alloc(ctx_pool, sizeof(*ctx));
 	ctx->server = server;
-	ctx->pool = globals.pModulePool;
+	ctx->pool = ctx_pool;
 	ctx->kpool = NULL;
 	ctx->kws = NULL;
 	switch_mutex_init(&ctx->write_mutex, SWITCH_MUTEX_NESTED, ctx->pool);
@@ -372,7 +381,7 @@ fail:
 		switch_core_hash_destroy(&ctx->pending);
 		switch_mutex_destroy(ctx->write_mutex);
 		switch_mutex_destroy(ctx->pending_mutex);
-		switch_core_free(ctx->pool, ctx);
+		switch_core_destroy_memory_pool(&ctx->pool);
 	}
 	janus_ws_libks_release();
 	return SWITCH_STATUS_FALSE;
@@ -397,7 +406,7 @@ void janus_ws_server_close(server_t *server)
 	switch_mutex_destroy(ctx->pending_mutex);
 	switch_core_hash_destroy(&ctx->pending);
 	server->janus_ws_handle = NULL;
-	switch_core_free(ctx->pool, ctx);
+	switch_core_destroy_memory_pool(&ctx->pool);
 	janus_ws_libks_release();
 }
 

@@ -37,7 +37,8 @@
 #define _HASH_H_
 
 #include  "switch.h"
-#include  "globals.h"
+
+typedef uint64_t janus_id_t;
 
 typedef struct {
   switch_mutex_t *pMutex;
