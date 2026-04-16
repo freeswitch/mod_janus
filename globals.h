@@ -35,6 +35,8 @@
 
 #include  "switch.h"
 
+typedef uint64_t janus_id_t;
+
 #include  "hash.h"
 
 typedef struct {
@@ -59,9 +61,6 @@ typedef struct {
 		switch_log_printf(details, SWITCH_LOG_DEBUG, __VA_ARGS__); \
 	} \
 } while (0)
-
-/* Verbose tracing in api.c / hash.c: always DEBUG level (not promoted when mod_janus debug=true). */
-#define MOD_JANUS_DBG(details, ...) switch_log_printf(details, SWITCH_LOG_DEBUG, __VA_ARGS__)
 
 extern globals_t globals;
 
