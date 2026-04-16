@@ -41,6 +41,9 @@
 #include	"servers.h"
 #include	"api.h"
 #include	"hash.h"
+#if defined(HAVE_MOD_JANUS_WS)
+#include	"janus_ws.h"
+#endif
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_janus_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown);
@@ -76,7 +79,8 @@ struct private_object {
 	switch_core_media_params_t mparams;
 
 	janus_id_t serverId;
-	janus_id_t roomId;
+	janus_id_t roomId;       /* numeric room id; 0 when using string room (pRoomIdStr) */
+	char *pRoomIdStr;        /* room as string (e.g. uuid); when set, Janus "room" is sent as string */
 	char *pDisplay;
 	janus_id_t senderId;
 	const char *callId;
@@ -192,8 +196,7 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Generated SDP=%s\n", tech_pvt->mparams.local_sdp_str);
 
-	if (apiConfigure(pServer->pUrl, 
-					pServer->pSecret, 
+	if (apiConfigure(pServer,
 					tech_pvt->serverId, 
 					tech_pvt->senderId,
 					switch_channel_var_true(channel, "janus-start-muted"),
@@ -337,8 +340,25 @@ switch_status_t trickle(janus_id_t serverId, janus_id_t senderId, const char *pC
 	}
 }
 
+switch_bool_t answer_on_webrtcup(janus_id_t serverId, janus_id_t senderId) {
+	switch_core_session_t *session;
+	switch_channel_t *channel;
+	server_t *pServer;
+	const char *var;
+
+	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
+		return SWITCH_FALSE;
+	}
+	if (!(session = (switch_core_session_t *) hashFind(&pServer->senderIdLookup, senderId))) {
+		return SWITCH_FALSE;
+	}
+	channel = switch_core_session_get_channel(session);
+	var = switch_channel_get_variable(channel, "answer_on_webrtcup");
+	return switch_true(var) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 switch_status_t answered(janus_id_t serverId, janus_id_t senderId) {
-	// called when we get a webrtcup event from Janus
+	/* called from api.c on SDP answer jsep event or on webrtcup event (single place that answers the channel) */
 	switch_core_session_t *session;
 	switch_channel_t *channel;
 	server_t *pServer;
@@ -392,9 +412,20 @@ switch_status_t hungup(janus_id_t serverId, janus_id_t senderId, const char *pRe
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* Human-readable transport label for log lines. */
+static const char *transport_name(const server_t *pServer) {
+#if defined(HAVE_MOD_JANUS_WS)
+	return (pServer && pServer->transport == JANUS_TP_WS) ? "WebSocket session" : "HTTP long-poll";
+#else
+	(void) pServer;
+	return "HTTP long-poll";
+#endif
+}
+
 static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void *pObj) {
 	server_t *pServer = (server_t *) pObj;
 	janus_id_t serverId = 0;
+	int outer_reconnect_delay = 0;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Thread started - server=%s\n", pServer->name);
 
@@ -403,22 +434,48 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 	while (!switch_test_flag(pServer, SFLAG_TERMINATING)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Server=%s invoking\n", pServer->name);
 
-		// wait for a few seconds before re-connection
-		switch_yield(5000000);
+		/* Back off before *re*connect attempts only. First pass must register immediately or outbound janus/... finds serverId=0. */
+		if (outer_reconnect_delay) {
+			switch_yield(5000000);
+		}
+		outer_reconnect_delay = 1;
+
+#if defined(HAVE_MOD_JANUS_WS)
+		/*
+		 * One persistent WebSocket per server: open only when there is no handle.
+		 * Session recovery uses Janus "claim" (and keepalives inside the pump), not TCP churn.
+		 * Close the socket only on transport-level failure (see claim SOCKERR / create failure below).
+		 */
+		if (pServer->transport == JANUS_TP_WS && !pServer->janus_ws_handle) {
+			if (janus_ws_server_open(pServer) != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s WebSocket connect failed\n", pServer->name);
+				continue;
+			}
+		}
+#endif
 
 		if (serverId) {
 			// the connection or Janus has restarted - try to re-use the same serverId
-			switch_status_t status =  apiClaimServerId(pServer->pUrl, pServer->pSecret, serverId);
+			switch_status_t status =  apiClaimServerId(pServer, serverId);
 			if (status == SWITCH_STATUS_SOCKERR) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s claim socket error - retry later\n", pServer->name);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s claim socket error - closing WebSocket, will reconnect\n", pServer->name);
+#if defined(HAVE_MOD_JANUS_WS)
+				if (pServer->transport == JANUS_TP_WS && pServer->janus_ws_handle) {
+					janus_ws_server_close(pServer);
+				}
+#endif
 			} else if (status == SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Server=%s claim success - serverId=%" SWITCH_UINT64_T_FMT "\n", pServer->name, serverId);
-				if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
-				}
 				switch_mutex_lock(pServer->mutex);
 				pServer->serverId = serverId;
 				switch_mutex_unlock(pServer->mutex);
+				if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
+					switch_mutex_lock(pServer->mutex);
+					pServer->serverId = 0;
+					switch_mutex_unlock(pServer->mutex);
+					serverId = 0;
+				}
 			} else {
 				// terminate all calls in progress on this server
 				switch_core_session_t *session;
@@ -441,26 +498,45 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 				serverId = 0;
 			}
 		} else {
-			// first time
-			serverId = apiGetServerId(pServer->pUrl, pServer->pSecret);
+			// first time (or new session after claim loss)
+			serverId = apiGetServerId(pServer);
 			if (!serverId) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Error getting serverId\n");
-			} else if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
+#if defined(HAVE_MOD_JANUS_WS)
+				/* Stale transport after Janus restart etc.: drop TCP so next loop opens a clean socket. */
+				if (pServer->transport == JANUS_TP_WS && pServer->janus_ws_handle) {
+					janus_ws_server_close(pServer);
+				}
+#endif
 			} else {
 				switch_mutex_lock(pServer->mutex);
 				pServer->started = switch_time_now();
 				pServer->serverId = serverId;
 				pServer->callsInProgress = 0;
 				switch_mutex_unlock(pServer->mutex);
+				if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
+					switch_mutex_lock(pServer->mutex);
+					pServer->serverId = 0;
+					switch_mutex_unlock(pServer->mutex);
+					serverId = 0;
+				}
 			}
 		}
 
-		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Poll started, serverId: %ld\n", (long)serverId);
+#if defined(HAVE_MOD_JANUS_WS)
+		if (pServer->transport == JANUS_TP_WS) {
+			pServer->ws_last_poll = switch_time_now();
+		}
+#endif
 
-			if (apiPoll(pServer->pUrl, pServer->pSecret, serverId, pServer->pAuthToken, joined, accepted, trickle, answered, hungup) != SWITCH_STATUS_SUCCESS) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Poll failed, serverId: %ld\n", (long)serverId);
+		while (!switch_test_flag(pServer, SFLAG_TERMINATING) && hashFind(&globals.serverIdLookup, serverId)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+				"Janus %s started (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
+
+			if (apiPoll(pServer, serverId, joined, accepted, trickle, answer_on_webrtcup, answered, hungup) != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+					"Janus %s failed (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't remove server %ld from hash table\n", (long)serverId);
 				}
@@ -469,13 +545,20 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 				pServer->serverId = 0;
 				switch_mutex_unlock(pServer->mutex);
 			} else {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Poll completed, serverId: %ld\n", (long)serverId);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+					"Janus %s completed (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 			}
 		}
 	}
 	(void) hashDestroy(&pServer->senderIdLookup);
 
 	(void) hashDelete(&globals.serverIdLookup, serverId);
+
+#if defined(HAVE_MOD_JANUS_WS)
+	if (pServer->transport == JANUS_TP_WS) {
+		janus_ws_server_close(pServer);
+	}
+#endif
 
 	return NULL;
 }
@@ -588,7 +671,7 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	tech_pvt->senderId = apiGetSenderId(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->callId);
+	tech_pvt->senderId = apiGetSenderId(pServer, tech_pvt->serverId, tech_pvt->callId);
 	if (!tech_pvt->senderId) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error getting senderId\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
@@ -606,11 +689,12 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	}
 
 	if (switch_channel_var_false(channel, "janus-use-existing-room")) {
-		if (!apiCreateRoom(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
+		if (apiCreateRoom(pServer, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->roomId,
 						switch_channel_get_variable(channel, "janus-room-description"),
 						switch_channel_var_true(channel, "janus-room-record"),
 						switch_channel_get_variable(channel, "janus-room-record-file"),
-						switch_channel_get_variable(channel, "janus-room-pin"))) {
+						switch_channel_get_variable(channel, "janus-room-pin"),
+						tech_pvt->pRoomIdStr) == 0) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create room\n");
 			switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 			return SWITCH_STATUS_FALSE;
@@ -661,15 +745,15 @@ static switch_status_t channel_on_routing(switch_core_session_t *session)
 	}
 
 	if (apiJoin(
-				pServer->pUrl,
-				pServer->pSecret,
+				pServer,
 				tech_pvt->serverId,
 				tech_pvt->senderId,
 				tech_pvt->roomId,
 				tech_pvt->pDisplay,
 				switch_channel_get_variable(channel, "janus-room-pin"),
 				switch_channel_get_variable(channel, "janus-user-token"),
-				tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
+				tech_pvt->callId,
+				tech_pvt->pRoomIdStr) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to join room\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);
 		return SWITCH_STATUS_FALSE;
@@ -768,12 +852,12 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 		return SWITCH_STATUS_NOTFOUND;
 	}
 
-	if (apiLeave(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
+	if (apiLeave(pServer, tech_pvt->serverId, tech_pvt->senderId, tech_pvt->callId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to leave room\n");
 		// carry on regardless
 	}
 
-	if (apiDetach(pServer->pUrl, pServer->pSecret, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
+	if (apiDetach(pServer, tech_pvt->serverId, tech_pvt->senderId) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Failed to detach\n");
 		// carry on regardless
 	}
@@ -1047,9 +1131,19 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	}
 	DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Found serverId=%" SWITCH_UINT64_T_FMT "\n", pTmpServer->serverId);
 
+	if (!pTmpServer->serverId) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"Janus server \"%s\" has no session_id yet (mod_janus thread still registering, or session lost after transport error). Try again shortly.\n",
+			pServerName);
+		status = SWITCH_CAUSE_NO_ROUTE_DESTINATION;
+		goto error;
+	}
+
 	// check that the server is available via the serverIdLookup map - ie. that it is active
 	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, pTmpServer->serverId))) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", pTmpServer->serverId);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"No active Janus session in lookup for server=\"%s\" session_id=%" SWITCH_UINT64_T_FMT " (hash out of sync or session torn down)\n",
+			pServerName, pTmpServer->serverId);
 		status = SWITCH_CAUSE_NO_ROUTE_DESTINATION;
 		goto error;
 	}
@@ -1097,10 +1191,16 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 		status = SWITCH_CAUSE_PROTOCOL_ERROR;
 		goto error;
 	}
-	*pNext ++ = '\0';
+	*pNext++ = '\0';
 
 	tech_pvt->pDisplay = switch_core_session_strdup(*new_session, pCurr);
-	tech_pvt->roomId = strtoull(pNext, NULL, 10);
+	/* Room: store full string (supports UUID when Janus string_ids=true); numeric only when whole string is digits */
+	tech_pvt->pRoomIdStr = switch_core_session_strdup(*new_session, pNext);
+	{
+		char *end = NULL;
+		unsigned long long n = strtoull(pNext, &end, 10);
+		tech_pvt->roomId = (end && *end == '\0') ? (janus_id_t) n : 0;
+	}
 
 	caller_profile = switch_caller_profile_clone(*new_session, outbound_profile);
 	switch_channel_set_caller_profile(channel, caller_profile);
@@ -1277,6 +1377,10 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown)
 	(void) hashDestroy(&globals.serverIdLookup);
 
 	(void) serversDestroy();
+
+#if defined(HAVE_MOD_JANUS_WS)
+	janus_ws_mod_global_shutdown();
+#endif
 
 	switch_curl_destroy();
 

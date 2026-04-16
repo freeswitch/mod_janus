@@ -70,7 +70,7 @@ switch_status_t hashInsert(const hash_t *pHash, const janus_id_t id, const  void
   switch_assert(pHash);
   switch_assert(pData);
 
-  DEBUG(SWITCH_CHANNEL_LOG, "Insert id=%" SWITCH_UINT64_T_FMT "\n", id);
+  MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Insert id=%" SWITCH_UINT64_T_FMT "\n", id);
 
   status = switch_core_hash_insert_locked(pHash->pTable, pIdStr, pData, pHash->pMutex);
   switch_safe_free(pIdStr);
@@ -84,7 +84,7 @@ void *hashFind(const hash_t *pHash, const janus_id_t id) {
 
   switch_assert(pHash);
 
-  DEBUG(SWITCH_CHANNEL_LOG, "Find id=%" SWITCH_UINT64_T_FMT "\n", id);
+  MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Find id=%" SWITCH_UINT64_T_FMT "\n", id);
 
   pResult = switch_core_hash_find_locked(pHash->pTable, pIdStr, pHash->pMutex);
   switch_safe_free(pIdStr);
@@ -98,7 +98,7 @@ switch_status_t hashDelete(const hash_t *pHash, const janus_id_t id) {
 
   switch_assert(pHash);
 
-  DEBUG(SWITCH_CHANNEL_LOG, "Delete id=%" SWITCH_UINT64_T_FMT "\n", id);
+  MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Delete id=%" SWITCH_UINT64_T_FMT "\n", id);
 
   pResult = switch_core_hash_delete_locked(pHash->pTable, pIdStr, pHash->pMutex);
   switch_safe_free(pIdStr);
