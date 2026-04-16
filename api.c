@@ -58,6 +58,19 @@ static void api_ws_add_token(cJSON *root, server_t *s)
 		cJSON_AddStringToObject(root, "token", s->pAuthToken);
 	}
 }
+
+/*
+ * Add a uint64 field as a raw JSON integer. cJSON stores numbers as `double`
+ * and its printer may fall back to `%1.15g` (e.g. "8.31461053888952e+15"),
+ * which Janus/Jansson parses as a JSON real and rejects for integer-only
+ * fields like session_id / handle_id. Emit the value verbatim instead.
+ */
+static void api_ws_add_u64(cJSON *root, const char *name, uint64_t value)
+{
+	char buf[32];
+	(void) snprintf(buf, sizeof(buf), "%" SWITCH_UINT64_T_FMT, value);
+	cJSON_AddRawToObject(root, name, buf);
+}
 #endif
 
 /*
@@ -84,8 +97,8 @@ static cJSON *api_send_request(server_t *pServer, cJSON *pJsonRequest, const cha
 {
 #if defined(HAVE_MOD_JANUS_WS)
 	if (pServer->transport == JANUS_TP_WS) {
-		if (serverId) cJSON_AddNumberToObject(pJsonRequest, "session_id", (double) serverId);
-		if (senderId) cJSON_AddNumberToObject(pJsonRequest, "handle_id", (double) senderId);
+		if (serverId) api_ws_add_u64(pJsonRequest, "session_id", (uint64_t) serverId);
+		if (senderId) api_ws_add_u64(pJsonRequest, "handle_id", (uint64_t) senderId);
 		api_ws_add_token(pJsonRequest, pServer);
 		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending WebSocket %s\n", label);
 		return janus_ws_rpc_json(pServer, pJsonRequest, pTransactionId,

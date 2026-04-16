@@ -368,10 +368,12 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 		cJSON *ka = cJSON_CreateObject();
 		if (ka) {
 			char txn[17] = {0};
+			char sid[32];
 			cJSON *resp;
 			switch_stun_random_string(txn, sizeof(txn) - 1, NULL);
 			cJSON_AddStringToObject(ka, "janus", "keepalive");
-			cJSON_AddNumberToObject(ka, "session_id", (double) session_id);
+			(void) snprintf(sid, sizeof(sid), "%" SWITCH_UINT64_T_FMT, (uint64_t) session_id);
+			cJSON_AddRawToObject(ka, "session_id", sid);
 			cJSON_AddStringToObject(ka, "transaction", txn);
 			if (server->pSecret) {
 				cJSON_AddStringToObject(ka, "apisecret", server->pSecret);
