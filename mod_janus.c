@@ -415,6 +415,7 @@ switch_status_t hungup(janus_id_t serverId, janus_id_t senderId, const char *pRe
 static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void *pObj) {
 	server_t *pServer = (server_t *) pObj;
 	janus_id_t serverId = 0;
+	int outer_reconnect_delay = 0;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Thread started - server=%s\n", pServer->name);
 
@@ -423,8 +424,11 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 	while (!switch_test_flag(pServer, SFLAG_TERMINATING)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Server=%s invoking\n", pServer->name);
 
-		// wait for a few seconds before re-connection
-		switch_yield(5000000);
+		/* Back off before *re*connect attempts only. First pass must register immediately or outbound janus/... finds serverId=0. */
+		if (outer_reconnect_delay) {
+			switch_yield(5000000);
+		}
+		outer_reconnect_delay = 1;
 
 #if defined(HAVE_MOD_JANUS_WS)
 		if (pServer->transport == JANUS_TP_WS) {
@@ -443,12 +447,16 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s claim socket error - retry later\n", pServer->name);
 			} else if (status == SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Server=%s claim success - serverId=%" SWITCH_UINT64_T_FMT "\n", pServer->name, serverId);
-				if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
-				}
 				switch_mutex_lock(pServer->mutex);
 				pServer->serverId = serverId;
 				switch_mutex_unlock(pServer->mutex);
+				if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
+					switch_mutex_lock(pServer->mutex);
+					pServer->serverId = 0;
+					switch_mutex_unlock(pServer->mutex);
+					serverId = 0;
+				}
 			} else {
 				// terminate all calls in progress on this server
 				switch_core_session_t *session;
@@ -475,14 +483,19 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 			serverId = apiGetServerId(pServer);
 			if (!serverId) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Error getting serverId\n");
-			} else if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
 			} else {
 				switch_mutex_lock(pServer->mutex);
 				pServer->started = switch_time_now();
 				pServer->serverId = serverId;
 				pServer->callsInProgress = 0;
 				switch_mutex_unlock(pServer->mutex);
+				if (hashInsert(&globals.serverIdLookup, serverId, (void *) pServer) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't insert server into hash table\n");
+					switch_mutex_lock(pServer->mutex);
+					pServer->serverId = 0;
+					switch_mutex_unlock(pServer->mutex);
+					serverId = 0;
+				}
 			}
 		}
 
@@ -1122,9 +1135,19 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	}
 	DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Found serverId=%" SWITCH_UINT64_T_FMT "\n", pTmpServer->serverId);
 
+	if (!pTmpServer->serverId) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"Janus server \"%s\" has no session_id yet (mod_janus thread still registering, or session lost after transport error). Try again shortly.\n",
+			pServerName);
+		status = SWITCH_CAUSE_NO_ROUTE_DESTINATION;
+		goto error;
+	}
+
 	// check that the server is available via the serverIdLookup map - ie. that it is active
 	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, pTmpServer->serverId))) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", pTmpServer->serverId);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"No active Janus session in lookup for server=\"%s\" session_id=%" SWITCH_UINT64_T_FMT " (hash out of sync or session torn down)\n",
+			pServerName, pTmpServer->serverId);
 		status = SWITCH_CAUSE_NO_ROUTE_DESTINATION;
 		goto error;
 	}
