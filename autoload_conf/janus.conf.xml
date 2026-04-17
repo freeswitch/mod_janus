@@ -7,6 +7,16 @@
     <param name="url" value="https://janus.conf.meetecho.com/janus"/>
     <!-- <param name="secret" value="the-secret"/> -->
     <!-- <param name="auth-token" value="the-auth-token"/> -->
+    <!--
+      HMAC signing key for Janus signed-mode auth. Must match the value of
+      `token_auth_secret` in Janus core's janus.jcfg (with `token_auth=true`).
+      When set, mod_janus generates a short-lived HMAC-SHA1 token for every
+      request and includes "room=<id>" in the audiobridge join body so that
+      per-room signed_tokens enforcement (PR #3635) accepts it. Setting this
+      supersedes `auth-token`. Per-call TTL (seconds) can be overridden with
+      the `janus-hmac-token-ttl` channel variable; default is 2 hours.
+    -->
+    <!-- <param name="hmac-secret" value="the-hmac-signing-key"/> -->
     <param name="enabled" value="true"/>
     <param name="rtp-ip" value="$${bind_server_ip}"/>
     <!-- <param name="apply-candidate-acl" value="localnet.auto"/> -->

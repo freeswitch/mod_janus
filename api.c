@@ -38,6 +38,8 @@
 #include  "switch_stun.h"
 #include  "globals.h"
 #include  "http.h"
+#include  "auth.h"
+#include  "api.h"
 
 #define TRANSACTION_ID_LENGTH 16
 #define JANUS_STRING  "janus"
@@ -47,6 +49,13 @@
 #define HTTP_GET_TIMEOUT 60000
 #define HTTP_POST_TIMEOUT 3000
 
+/*
+ * Maximum number of descriptors we ever embed in a signed token. The plugin
+ * package itself plus one scope descriptor (e.g. "room=<id>") is enough for
+ * today; bump this if we ever need more.
+ */
+#define MAX_TOKEN_DESCRIPTORS 4
+
 typedef struct {
 	const char *pType;
 	janus_id_t serverId;
@@ -55,6 +64,19 @@ typedef struct {
 	janus_id_t senderId;
 	switch_bool_t isPlugin;
 	const char *pSecret;
+	/*
+	 * When pHmacSecret is non-NULL, encode() will generate a fresh HMAC-SHA1
+	 * signed token (TTL = hmacTokenTtl seconds, fallback to 300) that embeds
+	 * the plugin package plus any additional descriptors listed below, and
+	 * attach it to the top-level request as the `token` field. The same
+	 * token is also returned via pSignedTokenOut so the caller can reuse it
+	 * in nested locations such as the audiobridge join body.
+	 */
+	const char *pHmacSecret;
+	int hmacTokenTtl;
+	const char *pExtraDescriptors[MAX_TOKEN_DESCRIPTORS];
+	int nExtraDescriptors;
+	char **pSignedTokenOut; /* optional: receives malloc'd token; caller frees */
 	cJSON *pJsonBody;
 	cJSON *pJsonJsep;
 	const char *pCandidate;
@@ -99,6 +121,44 @@ static cJSON *encode(const message_t message) {
 		if (cJSON_AddStringToObject(pJsonRequest, "apisecret", message.pSecret) == NULL) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (apisecret)\n");
 			goto error;
+		}
+	}
+
+	if (message.pHmacSecret) {
+		/*
+		 * Always include the plugin package as the first descriptor so that
+		 * Janus core's per-plugin access check passes. Extra descriptors
+		 * (e.g. "room=<id>") are appended to scope the token further; the
+		 * audiobridge/videoroom signed_tokens enforcement will look those up
+		 * via auth_signature_contains().
+		 */
+		const char *pDescriptors[MAX_TOKEN_DESCRIPTORS + 1];
+		int ndesc = 0;
+		pDescriptors[ndesc++] = JANUS_PLUGIN;
+		for (int i = 0; i < message.nExtraDescriptors && ndesc <= MAX_TOKEN_DESCRIPTORS; i++) {
+			if (message.pExtraDescriptors[i] && *message.pExtraDescriptors[i]) {
+				pDescriptors[ndesc++] = message.pExtraDescriptors[i];
+			}
+		}
+
+		int ttl = message.hmacTokenTtl > 0 ? message.hmacTokenTtl : API_HMAC_DEFAULT_LIFECYCLE_TTL;
+		char *pToken = authSignToken(message.pHmacSecret, ttl, pDescriptors, ndesc);
+		if (!pToken) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot sign token\n");
+			goto error;
+		}
+
+		if (cJSON_AddStringToObject(pJsonRequest, "token", pToken) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (token)\n");
+			free(pToken);
+			goto error;
+		}
+
+		if (message.pSignedTokenOut) {
+			/* Hand ownership to the caller; they must free(). */
+			*message.pSignedTokenOut = pToken;
+		} else {
+			free(pToken);
 		}
 	}
 
@@ -251,7 +311,7 @@ static message_t *decode(cJSON *pJsonResponse) {
 	return pMessage;
 }
 
-janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
+janus_id_t apiGetServerId(const char *pUrl, const char *pSecret, const char *pHmacSecret) {
   	janus_id_t serverId = 0;
 	message_t request, *pResponse = NULL;
 
@@ -268,6 +328,7 @@ janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
 	request.pType = "create";
 	request.pTransactionId = pTransactionId;
 	request.pSecret = pSecret;
+	request.pHmacSecret = pHmacSecret;
 
 	if (!(pJsonRequest = encode(request))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create request\n");
@@ -305,7 +366,7 @@ janus_id_t apiGetServerId(const char *pUrl, const char *pSecret) {
   	return serverId;
 }
 
-switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id_t serverId) {
+switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, const char *pHmacSecret, janus_id_t serverId) {
 	message_t request, *pResponse = NULL;
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -325,6 +386,7 @@ switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id
 	request.pType = "claim";
 	request.pTransactionId = pTransactionId;
 	request.pSecret = pSecret;
+	request.pHmacSecret = pHmacSecret;
 
 	if (!(pJsonRequest = encode(request))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create request\n");
@@ -397,7 +459,7 @@ switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, janus_id
   	return result;
 }
 
-janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_t serverId, const char *callId) {
+janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const char *callId) {
 	message_t request, *pResponse = NULL;
 	janus_id_t senderId = 0;
 
@@ -420,6 +482,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 	request.pTransactionId = pTransactionId;
 	request.opaqueId = callId;
 	request.pSecret = pSecret;
+	request.pHmacSecret = pHmacSecret;
 	request.isPlugin = SWITCH_TRUE;
 
 	if (!(pJsonRequest = encode(request))) {
@@ -463,7 +526,7 @@ janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_
 	return senderId;
 }
 
-janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId,
+janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId,
 		const janus_id_t senderId, const janus_id_t roomId, const char *pDescription,
 		switch_bool_t record, const char *pRecordingFile, const char *pPin, const char *pRoomIdStr) {
 	message_t request, *pResponse = NULL;
@@ -486,6 +549,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
 	request.pSecret = pSecret;
+	request.pHmacSecret = pHmacSecret;
 
 	request.pJsonBody = cJSON_CreateObject();
 	if (request.pJsonBody == NULL) {
@@ -613,7 +677,7 @@ janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t
 	return result;
 }
 
-switch_status_t apiJoin(const char *pUrl, const char *pSecret,
+switch_status_t apiJoin(const char *pUrl, const char *pSecret, const char *pHmacSecret, int hmacTokenTtl,
 		const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId,
 		const char *pDisplay, const char *pPin, const char *pToken, const char *callId, const char *pRoomIdStr) {
 	message_t request, *pResponse = NULL;
@@ -622,6 +686,8 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
   	cJSON *pJsonRequest = NULL;
   	cJSON *pJsonResponse = NULL;
 	char *pTransactionId = generateTransactionId();
+	char *pSignedToken = NULL; /* owned here, freed in "done:" */
+	char roomDesc[96];
   	char url[1024];
 
 	switch_assert(pUrl);
@@ -633,6 +699,35 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
 	request.pSecret = pSecret;
+	request.pHmacSecret = pHmacSecret;
+	request.hmacTokenTtl = hmacTokenTtl > 0 ? hmacTokenTtl : API_HMAC_DEFAULT_CALL_TTL;
+
+	/*
+	 * When the server is in HMAC-signing mode, generate a token that also
+	 * carries "room=<id>" so audiobridge's signed_tokens enforcement
+	 * (PR #3635) — which calls auth_signature_contains(..., "room=<id>") —
+	 * accepts the join. The signed token is emitted both at the top level
+	 * (by encode()) and inside body.token, which is where the plugin reads
+	 * it. The inbound `pToken` (stored-mode token from the
+	 * `janus-user-token` channel variable) is ignored in signed mode.
+	 */
+	if (pHmacSecret) {
+		if (pRoomIdStr && *pRoomIdStr) {
+			(void) switch_snprintf(roomDesc, sizeof(roomDesc), "room=%s", pRoomIdStr);
+		} else {
+			(void) switch_snprintf(roomDesc, sizeof(roomDesc),
+					"room=%" SWITCH_UINT64_T_FMT, roomId);
+		}
+		request.pExtraDescriptors[0] = roomDesc;
+		request.nExtraDescriptors = 1;
+		request.pSignedTokenOut = &pSignedToken;
+
+		if (pToken) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+					"apiJoin: ignoring janus-user-token, HMAC-signed token will be used instead\n");
+			pToken = NULL;
+		}
+	}
 
 	request.pJsonBody = cJSON_CreateObject();
 	if (request.pJsonBody == NULL) {
@@ -699,6 +794,19 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 		goto done;
 	}
 
+	/*
+	 * In HMAC-signing mode, mirror the top-level signed token into
+	 * body.token so the audiobridge plugin's signed_tokens check (which
+	 * reads from the plugin body, not the top-level) accepts the join.
+	 */
+	if (pSignedToken) {
+		if (cJSON_AddStringToObject(request.pJsonBody, "token", pSignedToken) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.token)\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+	}
+
 	if (snprintf(url, sizeof(url), "%s/%" SWITCH_UINT64_T_FMT "/%" SWITCH_UINT64_T_FMT, pUrl, serverId, senderId) < 0) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not generate URL\n");
 		result = SWITCH_STATUS_FALSE;
@@ -726,11 +834,12 @@ switch_status_t apiJoin(const char *pUrl, const char *pSecret,
 	cJSON_Delete(pJsonResponse);
 	switch_safe_free(pResponse);
 	switch_safe_free(pTransactionId);
+	switch_safe_free(pSignedToken);
 
   	return result;
 }
 
-switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
+switch_status_t apiConfigure(const char *pUrl, const char *pSecret, const char *pHmacSecret,
 		const janus_id_t serverId, const janus_id_t senderId, const switch_bool_t muted,
 		switch_bool_t record, const char *pRecordingFile,
 		const char *pType, const char *pSdp, const char *callId) {
@@ -751,6 +860,7 @@ switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
 	request.pSecret = pSecret;
+	request.pHmacSecret = pHmacSecret;
 
 	request.pJsonBody = cJSON_CreateObject();
 
@@ -858,7 +968,7 @@ switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
   	return result;
 }
 
-switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const char *callId) {
+switch_status_t apiLeave(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const janus_id_t senderId, const char *callId) {
 	message_t request, *pResponse = NULL;
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -876,6 +986,7 @@ switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
 	request.pSecret = pSecret;
+	request.pHmacSecret = pHmacSecret;
 
 	request.pJsonBody = cJSON_CreateObject();
 	if (request.pJsonBody == NULL) {
@@ -934,7 +1045,7 @@ switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t
 	return result;
 }
 
-switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId) {
+switch_status_t apiDetach(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const janus_id_t senderId) {
 	message_t request, *pResponse = NULL;
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -947,6 +1058,7 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
 
 	(void) memset((void *) &request, 0, sizeof(request));
 	request.pType = "detach";
+	request.pHmacSecret = pHmacSecret;
 	request.serverId = serverId;
 	request.pTransactionId = pTransactionId;
 	request.pSecret = pSecret;
@@ -987,7 +1099,7 @@ switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_
   	return result;
 }
 
-switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t serverId, const char *pAuthToken,
+switch_status_t apiPoll(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const char *pAuthToken,
   	switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
   	switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
@@ -1007,6 +1119,7 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 	cJSON *pJsonRspError;
 	cJSON *pJsonRspErrorCode;
 
+	char *pSignedToken = NULL;
   	char url[1024];
 
 	switch_assert(pUrl);
@@ -1024,6 +1137,23 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 			result = SWITCH_STATUS_FALSE;
 	    	goto done;
 		}
+	}
+
+	/*
+	 * In signed-mode, every request (including long-poll GETs) needs a
+	 * fresh signed token since old ones can expire mid-session. The
+	 * lifecycle TTL is short on purpose — we regenerate per poll cycle, so
+	 * leaking a URL to logs only exposes a 5-minute window.
+	 */
+	if (pHmacSecret) {
+		const char *pDescriptors[1] = { JANUS_PLUGIN };
+		pSignedToken = authSignToken(pHmacSecret, API_HMAC_DEFAULT_LIFECYCLE_TTL, pDescriptors, 1);
+		if (!pSignedToken) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot sign poll token\n");
+			result = SWITCH_STATUS_FALSE;
+			goto done;
+		}
+		pAuthToken = pSignedToken; /* overrides any stored-mode token */
 	}
 
 	if (pAuthToken) {
@@ -1205,6 +1335,7 @@ switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t 
 
 	done:
 	cJSON_Delete(pJsonResponse);
+	switch_safe_free(pSignedToken);
 
   return result;
 }

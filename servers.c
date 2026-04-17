@@ -94,6 +94,8 @@ switch_status_t serversAdd(switch_xml_t xmlint) {
 			pServer->pSecret = switch_core_strdup(globals.pModulePool, pValStr);
 		} else if (!strcmp(pVarStr, "auth-token") && !zstr(pValStr)) {
 			pServer->pAuthToken = switch_core_strdup(globals.pModulePool, pValStr);
+		} else if (!strcmp(pVarStr, "hmac-secret") && !zstr(pValStr)) {
+			pServer->pHmacSecret = switch_core_strdup(globals.pModulePool, pValStr);
 		} else if (!strcmp(pVarStr, "local-network-acl") && !zstr(pValStr)) {
       if (strcasecmp(pValStr, "none")) {
 	      pServer->local_network = switch_core_strdup(globals.pModulePool, pValStr);
@@ -168,6 +170,12 @@ switch_status_t serversAdd(switch_xml_t xmlint) {
 	if (!pServer->pUrl) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Server=%s  Mandatory parameter not specified\n", pName);
 		return SWITCH_STATUS_FALSE;
+	}
+
+	if (pServer->pHmacSecret && pServer->pAuthToken) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+				"Server=%s  Both 'hmac-secret' and 'auth-token' are set; auth-token will be ignored and HMAC-signed tokens will be used instead\n",
+				pName);
 	}
 
 	switch_core_hash_insert(globals.pServerNameLookup, pName, pServer);
