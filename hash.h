@@ -37,7 +37,16 @@
 #define _HASH_H_
 
 #include  "switch.h"
-#include  "globals.h"
+
+/*
+ * Defined here (not in globals.h) so that hash.h is self-contained and does not
+ * need to include globals.h. globals.h includes hash.h and uses janus_id_t via
+ * this typedef, so the include graph is one-way: globals.h -> hash.h.
+ *
+ * Including globals.h from hash.h produces a use-before-typedef of hash_t when
+ * any TU enters the graph through hash.h (e.g. janus_ws.c -> servers.h -> hash.h).
+ */
+typedef uint64_t janus_id_t;
 
 typedef struct {
   switch_mutex_t *pMutex;
