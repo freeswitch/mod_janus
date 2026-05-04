@@ -35,18 +35,29 @@
 
 #include  "globals.h"
 
-janus_id_t apiGetServerId(const char *pUrl, const char *pSecret);
-switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, const janus_id_t serverId);
-janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const janus_id_t serverId, const char *callId);
-janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDescription, switch_bool_t record, const char *pRecordingFile, const char *pPin, const char *pRoomIdStr);
-switch_status_t apiJoin(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDisplay, const char *pPin, const char *pToken, const char *callId, const char *pRoomIdStr);
-switch_status_t apiConfigure(const char *pUrl, const char *pSecret,
+/*
+ * Default TTLs (seconds) used for internally generated HMAC-signed tokens
+ * when the caller does not supply an explicit value. Call-scoped functions
+ * (join, configure, leave, detach) accept a per-call TTL so operators can
+ * override via the `janus-hmac-token-ttl` channel variable; lifecycle
+ * helpers (create/claim session, poll) use a short fixed default since the
+ * token only needs to cover one round-trip (or one long-poll cycle).
+ */
+#define API_HMAC_DEFAULT_CALL_TTL     7200 /* 2 hours */
+#define API_HMAC_DEFAULT_LIFECYCLE_TTL 300 /* 5 minutes */
+
+janus_id_t apiGetServerId(const char *pUrl, const char *pSecret, const char *pHmacSecret);
+switch_status_t apiClaimServerId(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId);
+janus_id_t apiGetSenderId(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const char *callId);
+janus_id_t apiCreateRoom(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDescription, switch_bool_t record, const char *pRecordingFile, const char *pPin, const char *pRoomIdStr);
+switch_status_t apiJoin(const char *pUrl, const char *pSecret, const char *pHmacSecret, int hmacTokenTtl, const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const char *pDisplay, const char *pPin, const char *pToken, const char *callId, const char *pRoomIdStr);
+switch_status_t apiConfigure(const char *pUrl, const char *pSecret, const char *pHmacSecret,
 		const janus_id_t serverId, const janus_id_t senderId, const switch_bool_t muted,
 		switch_bool_t record, const char *pRecordingFile,
 		const char *pType, const char *pSdp, const char *callId);
-switch_status_t apiLeave(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId, const char *callId);
-switch_status_t apiDetach(const char *pUrl, const char *pSecret, const janus_id_t serverId, const janus_id_t senderId);
-switch_status_t apiPoll(const char *pUrl, const char *pSecret, const janus_id_t serverId, const char *pAuthToken,
+switch_status_t apiLeave(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const janus_id_t senderId, const char *callId);
+switch_status_t apiDetach(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const janus_id_t senderId);
+switch_status_t apiPoll(const char *pUrl, const char *pSecret, const char *pHmacSecret, const janus_id_t serverId, const char *pAuthToken,
 switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
 switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
 switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),

@@ -47,6 +47,12 @@ typedef struct {
 	char *pUrl;
 	char *pSecret;
 	char *pAuthToken;
+	/* When set, Janus core is expected to run with token_auth=true and
+	 * token_auth_secret=<pHmacSecret>. mod_janus will HMAC-sign short-lived
+	 * tokens with this key and attach them to every Janus API request, as
+	 * well as to the audiobridge join body so that per-room signed_tokens
+	 * enforcement (PR #3635) accepts them. */
+	char *pHmacSecret;
 	switch_thread_t *pThread;
 
 	char *local_network;
