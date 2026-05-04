@@ -37,6 +37,18 @@ AS_VAR_IF([$1], [""], [$4], [$3])dnl
 ])# PKG_CHECK_VAR
 
 PKG_CHECK_MODULES([FREESWITCH],[freeswitch],[],[])
+
+have_ks=no
+PKG_CHECK_MODULES([KS], [libks2 >= 2.0.0], [have_ks=yes], [:])
+if test "x$have_ks" != xyes; then
+  PKG_CHECK_MODULES([KS], [libks >= 1.8.2], [have_ks=yes], [:])
+fi
+if test "x$have_ks" != xyes; then
+  KS_CFLAGS=""
+  KS_LIBS=""
+fi
+AM_CONDITIONAL([HAVE_KS], [test "x$have_ks" = xyes])
+
 PKG_CHECK_VAR([moddir],[freeswitch],[modulesdir])
 PKG_CHECK_VAR([confdir],[freeswitch],[confdir])
 PKG_CHECK_VER([version],[freeswitch])
@@ -50,6 +62,8 @@ AC_SUBST(SWITCH_VERSION_MINOR, [$SWITCH_VERSION_MINOR])
 AC_SUBST(SWITCH_VERSION_MICRO, [$SWITCH_VERSION_MICRO])
 AC_SUBST(FREESWITCH_CFLAGS)
 AC_SUBST(FREESWITCH_LDFLAGS)
+AC_SUBST(KS_CFLAGS)
+AC_SUBST(KS_LIBS)
 AC_SUBST(moddir)
 AC_SUBST(confdir)
 

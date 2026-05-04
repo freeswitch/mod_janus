@@ -62,6 +62,9 @@ typedef struct {
 	} \
 } while (0)
 
+/* Verbose tracing in api.c / hash.c: always DEBUG level (not promoted when mod_janus debug=true). */
+#define MOD_JANUS_DBG(details, ...) switch_log_printf(details, SWITCH_LOG_DEBUG, __VA_ARGS__)
+
 extern globals_t globals;
 
 #endif //_GLOBALS_H_

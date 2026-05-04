@@ -77,6 +77,9 @@ switch_status_t serversAdd(switch_xml_t xmlint) {
   pServer->totalCalls = 0;
   pServer->callsInProgress = 0;
   pServer->pThread = NULL;
+  pServer->transport = JANUS_TP_HTTP;
+  pServer->janus_ws_handle = NULL;
+  pServer->ws_last_poll = 0;
 
 	// set default values
 	pServer->name = switch_core_strdup(globals.pModulePool, pName);
@@ -170,6 +173,21 @@ switch_status_t serversAdd(switch_xml_t xmlint) {
 	if (!pServer->pUrl) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Server=%s  Mandatory parameter not specified\n", pName);
 		return SWITCH_STATUS_FALSE;
+	}
+
+	if (!strncasecmp(pServer->pUrl, "ws://", 5) || !strncasecmp(pServer->pUrl, "wss://", 6)) {
+#if defined(HAVE_MOD_JANUS_WS)
+		pServer->transport = JANUS_TP_WS;
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+				"Server=%s  WebSocket transport selected (url=%s)\n", pName, pServer->pUrl);
+#else
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+				"Server=%s  WebSocket URL '%s' but mod_janus was built without libks support\n",
+				pName, pServer->pUrl);
+		return SWITCH_STATUS_FALSE;
+#endif
+	} else {
+		pServer->transport = JANUS_TP_HTTP;
 	}
 
 	if (pServer->pHmacSecret && pServer->pAuthToken) {

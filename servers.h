@@ -42,7 +42,12 @@ typedef enum {
 	SFLAG_AUTO_NAT       = (1 << 2)
 } SFLAGS;
 
-typedef struct {
+typedef enum {
+	JANUS_TP_HTTP = 0,
+	JANUS_TP_WS
+} janus_transport_t;
+
+typedef struct server_s {
 	char *name;
 	char *pUrl;
 	char *pSecret;
@@ -80,6 +85,10 @@ typedef struct {
 	switch_time_t started;
 	unsigned int totalCalls;
 	unsigned int callsInProgress;
+
+	janus_transport_t transport;
+	void *janus_ws_handle; /* janus_ws_ctx_t when transport == JANUS_TP_WS */
+	switch_time_t ws_last_poll; /* WebSocket keepalive / activity timestamp */
 } server_t;
 
 switch_status_t serversList(const char *pLine, const char *pCursor, switch_console_callback_match_t **matches);
