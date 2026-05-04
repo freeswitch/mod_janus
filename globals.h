@@ -34,9 +34,6 @@
 #define _GLOBALS_H_
 
 #include  "switch.h"
-
-typedef uint64_t janus_id_t;
-
 #include  "hash.h"
 
 typedef struct {
