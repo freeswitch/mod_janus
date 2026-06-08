@@ -398,13 +398,46 @@ static cJSON *api_send_request(server_t *pServer, cJSON *pJsonRequest, const cha
 	}
 }
 
+/* Reports each remote participant in an audiobridge "participants" array; ids are normalised to a string (numeric or string_ids rooms). */
+static void api_dispatch_participants(message_t *pResponse, cJSON *pParticipants,
+	api_participant_func_t pParticipantFunc)
+{
+	cJSON *pItem = NULL;
+
+	if (!pParticipantFunc || !cJSON_IsArray(pParticipants)) {
+		return;
+	}
+
+	cJSON_ArrayForEach(pItem, pParticipants) {
+		cJSON *pId = cJSON_GetObjectItemCaseSensitive(pItem, "id");
+		cJSON *pSetup = cJSON_GetObjectItemCaseSensitive(pItem, "setup");
+		char idBuf[64];
+		const char *pIdStr = NULL;
+		switch_bool_t setup;
+
+		if (cJSON_IsString(pId)) {
+			pIdStr = pId->valuestring;
+		} else if (cJSON_IsNumber(pId)) {
+			(void) switch_snprintf(idBuf, sizeof(idBuf), "%" SWITCH_UINT64_T_FMT, (janus_id_t) pId->valuedouble);
+			pIdStr = idBuf;
+		} else {
+			continue;
+		}
+
+		setup = cJSON_IsTrue(pSetup) ? SWITCH_TRUE : SWITCH_FALSE;
+
+		(void) pParticipantFunc(pResponse->serverId, pResponse->senderId, pIdStr, SWITCH_FALSE, setup);
+	}
+}
+
 switch_status_t api_dispatch_poll_event(cJSON *pEvent,
 	switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
 	switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
 	switch_bool_t (*pAnswerOnWebrtcupFunc)(const janus_id_t serverId, const janus_id_t senderId),
 	switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
-	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason))
+	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason),
+	api_participant_func_t pParticipantFunc)
 {
 	message_t *pResponse = NULL;
 	cJSON *pJsonRspReason;
@@ -496,8 +529,28 @@ switch_status_t api_dispatch_poll_event(cJSON *pEvent,
 				if ((*pJoinedFunc)(pResponse->serverId, pResponse->senderId, roomId, participantId)) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't join\n");
 				}
+
+				/* Record our own participant id so we never treat ourselves as the remote peer. */
+				if (pParticipantFunc) {
+					char selfBuf[64];
+					const char *pSelfIdStr = NULL;
+					if (cJSON_IsString(pJsonRspParticipantId)) {
+						pSelfIdStr = pJsonRspParticipantId->valuestring;
+					} else if (cJSON_IsNumber(pJsonRspParticipantId)) {
+						(void) switch_snprintf(selfBuf, sizeof(selfBuf), "%" SWITCH_UINT64_T_FMT, (janus_id_t) participantId);
+						pSelfIdStr = selfBuf;
+					}
+					if (pSelfIdStr) {
+						(void) pParticipantFunc(pResponse->serverId, pResponse->senderId, pSelfIdStr, SWITCH_TRUE, SWITCH_TRUE);
+					}
+				}
+
+				api_dispatch_participants(pResponse,
+					cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "participants"), pParticipantFunc);
 			} else {
 				MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Someone else has joined\n");
+				api_dispatch_participants(pResponse,
+					cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "participants"), pParticipantFunc);
 			}
 		} else if (!strcmp("event", pJsonRspType->valuestring)) {
 			pJsonRspType = cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "result");
@@ -549,6 +602,10 @@ switch_status_t api_dispatch_poll_event(cJSON *pEvent,
 				if ((*pHungupFunc)(pResponse->serverId, pResponse->senderId, pJsonRspError->valuestring)) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Couldn't hangup\n");
 				}
+			} else if (cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "participants"))) {
+				/* Participant state change (e.g. a peer reaching setup:true) - how we learn the browser can hear audio. */
+				api_dispatch_participants(pResponse,
+					cJSON_GetObjectItemCaseSensitive(pResponse->pJsonBody, "participants"), pParticipantFunc);
 			} else {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unknown audiobridge event\n");
 				goto end_dispatch;
@@ -1308,7 +1365,8 @@ switch_status_t apiPoll(server_t *pServer, const janus_id_t serverId,
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
 	switch_bool_t (*pAnswerOnWebrtcupFunc)(const janus_id_t serverId, const janus_id_t senderId),
 	switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
-	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason))
+	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason),
+	api_participant_func_t pParticipantFunc)
 {
 	switch_status_t result = SWITCH_STATUS_SUCCESS;
 
@@ -1328,7 +1386,7 @@ switch_status_t apiPoll(server_t *pServer, const janus_id_t serverId,
 			(switch_interval_time_t)HTTP_GET_TIMEOUT * 1000,
 			(switch_interval_time_t)(25 * 1000000),
 			&pServer->ws_last_poll,
-			pJoinedFunc, pAcceptedFunc, pTrickleFunc, pAnswerOnWebrtcupFunc, pAnsweredFunc, pHungupFunc);
+			pJoinedFunc, pAcceptedFunc, pTrickleFunc, pAnswerOnWebrtcupFunc, pAnsweredFunc, pHungupFunc, pParticipantFunc);
 	}
 #endif
 
@@ -1386,7 +1444,7 @@ switch_status_t apiPoll(server_t *pServer, const janus_id_t serverId,
 	pEvent = pJsonResponse ? pJsonResponse->child : NULL;
 	while (pEvent) {
 		cJSON *next = pEvent->next;
-		(void) api_dispatch_poll_event(pEvent, pJoinedFunc, pAcceptedFunc, pTrickleFunc, pAnswerOnWebrtcupFunc, pAnsweredFunc, pHungupFunc);
+		(void) api_dispatch_poll_event(pEvent, pJoinedFunc, pAcceptedFunc, pTrickleFunc, pAnswerOnWebrtcupFunc, pAnsweredFunc, pHungupFunc, pParticipantFunc);
 		pEvent = next;
 	}
 
