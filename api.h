@@ -48,6 +48,10 @@
 #define API_HMAC_DEFAULT_CALL_TTL     7200 /* 2 hours */
 #define API_HMAC_DEFAULT_LIFECYCLE_TTL 300 /* 5 minutes */
 
+/* Reports each audiobridge participant; isSelf marks the local leg's own id, setup is TRUE once the peer's PeerConnection is up. */
+typedef switch_status_t (*api_participant_func_t)(const janus_id_t serverId, const janus_id_t senderId,
+	const char *pParticipantIdStr, const switch_bool_t isSelf, const switch_bool_t setup);
+
 /* Dispatch one Janus event object (HTTP long-poll element or WebSocket text frame). */
 switch_status_t api_dispatch_poll_event(cJSON *pEvent,
 	switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
@@ -55,7 +59,8 @@ switch_status_t api_dispatch_poll_event(cJSON *pEvent,
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
 	switch_bool_t (*pAnswerOnWebrtcupFunc)(const janus_id_t serverId, const janus_id_t senderId),
 	switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
-	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason));
+	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason),
+	api_participant_func_t pParticipantFunc);
 
 janus_id_t apiGetServerId(server_t *pServer);
 switch_status_t apiClaimServerId(server_t *pServer, janus_id_t serverId);
@@ -78,7 +83,8 @@ switch_status_t apiPoll(server_t *pServer, const janus_id_t serverId,
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
 	switch_bool_t (*pAnswerOnWebrtcupFunc)(const janus_id_t serverId, const janus_id_t senderId),
 	switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
-	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason));
+	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason),
+	api_participant_func_t pParticipantFunc);
 
 #endif //_API_H_
 /* For Emacs:

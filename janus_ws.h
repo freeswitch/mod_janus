@@ -10,6 +10,7 @@
 #define MOD_JANUS_JANUS_WS_H
 
 #include "servers.h"
+#include "api.h"
 
 #if defined(HAVE_MOD_JANUS_WS)
 
@@ -35,7 +36,8 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 	switch_status_t (*pTrickleFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pCandidate),
 	switch_bool_t (*pAnswerOnWebrtcupFunc)(const janus_id_t serverId, const janus_id_t senderId),
 	switch_status_t (*pAnsweredFunc)(const janus_id_t serverId, const janus_id_t senderId),
-	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason));
+	switch_status_t (*pHungupFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pReason),
+	api_participant_func_t pParticipantFunc);
 
 #endif /* HAVE_MOD_JANUS_WS */
 

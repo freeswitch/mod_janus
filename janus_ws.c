@@ -180,12 +180,13 @@ typedef struct {
 	switch_bool_t   (*answer_on_webrtcup)(const janus_id_t, const janus_id_t);
 	switch_status_t (*answered)(const janus_id_t, const janus_id_t);
 	switch_status_t (*hungup)(const janus_id_t, const janus_id_t, const char *);
+	api_participant_func_t participant;
 } janus_ws_dispatch_t;
 
 static void janus_ws_dispatch_event(cJSON *root, const janus_ws_dispatch_t *d)
 {
 	(void) api_dispatch_poll_event(root,
-		d->joined, d->accepted, d->trickle, d->answer_on_webrtcup, d->answered, d->hungup);
+		d->joined, d->accepted, d->trickle, d->answer_on_webrtcup, d->answered, d->hungup, d->participant);
 	cJSON_Delete(root);
 }
 
@@ -345,7 +346,8 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 	switch_status_t (*pTrickleFunc)(const janus_id_t, const janus_id_t, const char *),
 	switch_bool_t   (*pAnswerOnWebrtcupFunc)(const janus_id_t, const janus_id_t),
 	switch_status_t (*pAnsweredFunc)(const janus_id_t, const janus_id_t),
-	switch_status_t (*pHungupFunc)(const janus_id_t, const janus_id_t, const char *))
+	switch_status_t (*pHungupFunc)(const janus_id_t, const janus_id_t, const char *),
+	api_participant_func_t pParticipantFunc)
 {
 	janus_ws_ctx_t *ctx = janus_ws_ctx_get(server);
 	janus_ws_dispatch_t dispatch;
@@ -361,6 +363,7 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 	dispatch.answer_on_webrtcup = pAnswerOnWebrtcupFunc;
 	dispatch.answered           = pAnsweredFunc;
 	dispatch.hungup             = pHungupFunc;
+	dispatch.participant        = pParticipantFunc;
 
 	/* Keepalive. Nested RPC re-enters io_mutex (NESTED), then drain happens below. */
 	if (keepalive_interval_us > 0 && session_id && last_activity_ref && *last_activity_ref > 0 &&

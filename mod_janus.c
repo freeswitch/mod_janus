@@ -88,8 +88,18 @@ struct private_object {
 	char *pSdpBody;
 	char *pSdpCandidates;
 	char isTrickleComplete;
+
+	/* Answer gating (janus-answer-on-participant-ready): defer the SIP answer until a remote participant is ready; guarded by flag_mutex. */
+	char *pParticipantIdStr;
+	switch_bool_t answerGate;
+	switch_bool_t remoteReady;
+	switch_bool_t answerRequested;
+	switch_bool_t answerDone;
+	switch_time_t answerDeadline;
 };
 typedef struct private_object private_t;
+
+#define JANUS_ANSWER_PARTICIPANT_TIMEOUT_MS_DEFAULT 10000
 
 #define JANUS_SYNTAX "janus [debug|status|listgw]"
 #define JANUS_DEBUG_SYNTAX "janus debug [true|false]"
@@ -135,6 +145,20 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 
 	tech_pvt = switch_core_session_get_private(session);
 	switch_assert(tech_pvt);
+
+	if (switch_channel_var_true(channel, "janus-answer-on-participant-ready")) {
+		const char *pTimeout = switch_channel_get_variable(channel, "janus-answer-participant-timeout-ms");
+		int timeoutMs = pTimeout ? atoi(pTimeout) : 0;
+		if (timeoutMs <= 0) {
+			timeoutMs = JANUS_ANSWER_PARTICIPANT_TIMEOUT_MS_DEFAULT;
+		}
+		switch_mutex_lock(tech_pvt->flag_mutex);
+		tech_pvt->answerGate = SWITCH_TRUE;
+		tech_pvt->answerDeadline = switch_time_now() + (switch_time_t) timeoutMs * 1000;
+		switch_mutex_unlock(tech_pvt->flag_mutex);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+			"Answer gating enabled - deferring answer until a remote participant is ready (timeout=%dms)\n", timeoutMs);
+	}
 
 	switch_channel_set_variable(channel, "media_webrtc", "true");
 	switch_channel_set_flag(channel, CF_AUDIO);
@@ -362,6 +386,7 @@ switch_status_t answered(janus_id_t serverId, janus_id_t senderId) {
 	switch_core_session_t *session;
 	switch_channel_t *channel;
 	server_t *pServer;
+	private_t *tech_pvt;
 
 	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", serverId);
@@ -376,6 +401,25 @@ switch_status_t answered(janus_id_t serverId, janus_id_t senderId) {
 	channel = switch_core_session_get_channel(session);
 	switch_assert(channel);
 
+	tech_pvt = switch_core_session_get_private(session);
+	switch_assert(tech_pvt);
+
+	/* When gating, hold the answer until a remote participant is ready; record that Janus made the leg answerable. */
+	switch_mutex_lock(tech_pvt->flag_mutex);
+	if (tech_pvt->answerDone) {
+		switch_mutex_unlock(tech_pvt->flag_mutex);
+		return SWITCH_STATUS_SUCCESS;
+	}
+	if (tech_pvt->answerGate && !tech_pvt->remoteReady) {
+		tech_pvt->answerRequested = SWITCH_TRUE;
+		switch_mutex_unlock(tech_pvt->flag_mutex);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+			"Answer requested by Janus - deferring until a remote participant is ready\n");
+		return SWITCH_STATUS_SUCCESS;
+	}
+	tech_pvt->answerDone = SWITCH_TRUE;
+	switch_mutex_unlock(tech_pvt->flag_mutex);
+
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Doing answer\n");
 	if (switch_channel_answer(channel) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Channel answer failed.\n");
@@ -384,6 +428,65 @@ switch_status_t answered(janus_id_t serverId, janus_id_t senderId) {
 
 	switch_channel_mark_answered(channel);
 
+	return SWITCH_STATUS_SUCCESS;
+}
+
+/* Records our own id (isSelf) and, when gating is on, releases the deferred answer once a remote participant reaches setup:true. */
+switch_status_t participant(janus_id_t serverId, janus_id_t senderId, const char *pParticipantIdStr,
+		switch_bool_t isSelf, switch_bool_t setup) {
+	switch_core_session_t *session;
+	server_t *pServer;
+	private_t *tech_pvt;
+	switch_bool_t shouldAnswer = SWITCH_FALSE;
+
+	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
+		return SWITCH_STATUS_NOTFOUND;
+	}
+	if (!(session = (switch_core_session_t *) hashFind(&pServer->senderIdLookup, senderId))) {
+		return SWITCH_STATUS_NOTFOUND;
+	}
+
+	tech_pvt = switch_core_session_get_private(session);
+	switch_assert(tech_pvt);
+
+	if (isSelf) {
+		switch_mutex_lock(tech_pvt->flag_mutex);
+		if (!tech_pvt->pParticipantIdStr && pParticipantIdStr) {
+			tech_pvt->pParticipantIdStr = switch_core_session_strdup(session, pParticipantIdStr);
+		}
+		switch_mutex_unlock(tech_pvt->flag_mutex);
+		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Own participant id=%s\n", pParticipantIdStr ? pParticipantIdStr : "");
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	switch_mutex_lock(tech_pvt->flag_mutex);
+	if (!tech_pvt->answerGate || tech_pvt->answerDone) {
+		switch_mutex_unlock(tech_pvt->flag_mutex);
+		return SWITCH_STATUS_SUCCESS;
+	}
+	/* Defensive: never let our own participant id satisfy the gate. */
+	if (pParticipantIdStr && tech_pvt->pParticipantIdStr &&
+			!strcmp(pParticipantIdStr, tech_pvt->pParticipantIdStr)) {
+		switch_mutex_unlock(tech_pvt->flag_mutex);
+		return SWITCH_STATUS_SUCCESS;
+	}
+	if (!setup) {
+		switch_mutex_unlock(tech_pvt->flag_mutex);
+		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Remote participant %s present but not yet set up\n",
+			pParticipantIdStr ? pParticipantIdStr : "");
+		return SWITCH_STATUS_SUCCESS;
+	}
+	tech_pvt->remoteReady = SWITCH_TRUE;
+	/* Answer now only if Janus already made the leg answerable; otherwise the upcoming answered() call proceeds. */
+	shouldAnswer = tech_pvt->answerRequested;
+	switch_mutex_unlock(tech_pvt->flag_mutex);
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+		"Remote participant %s is ready - releasing answer\n", pParticipantIdStr ? pParticipantIdStr : "");
+
+	if (shouldAnswer) {
+		return answered(serverId, senderId);
+	}
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -534,7 +637,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
 				"Janus %s started (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 
-			if (apiPoll(pServer, serverId, joined, accepted, trickle, answer_on_webrtcup, answered, hungup) != SWITCH_STATUS_SUCCESS) {
+			if (apiPoll(pServer, serverId, joined, accepted, trickle, answer_on_webrtcup, answered, hungup, participant) != SWITCH_STATUS_SUCCESS) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 					"Janus %s failed (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {
@@ -1020,6 +1123,21 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 // 	tech_pvt->read_frame.flags = SFF_CNG;
 // 	*frame = &tech_pvt->read_frame;
 // 	return SWITCH_STATUS_SUCCESS;
+
+	{
+		/* Answer-gating fallback: answer once the deadline passes so a missing/failed browser cannot wedge the call. */
+		private_t *tech_pvt = switch_core_session_get_private(session);
+		if (tech_pvt && tech_pvt->answerGate && tech_pvt->answerRequested &&
+				!tech_pvt->answerDone && tech_pvt->answerDeadline &&
+				switch_time_now() >= tech_pvt->answerDeadline) {
+			switch_mutex_lock(tech_pvt->flag_mutex);
+			tech_pvt->remoteReady = SWITCH_TRUE;
+			switch_mutex_unlock(tech_pvt->flag_mutex);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+				"Answer-gating timeout - answering without a confirmed remote participant\n");
+			(void) answered(tech_pvt->serverId, tech_pvt->senderId);
+		}
+	}
 
 	return switch_core_media_read_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
 }

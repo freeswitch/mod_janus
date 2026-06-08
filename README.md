@@ -140,6 +140,8 @@ The following channel variables are defined:
 * janus-user-record - Janus should generate a file containing the audio from the user only.  It is specified in the *configure* request.  The default value is not to record.
 * janus-user-record-file - This specifies the base of the filename used when recording the user audio stream.  If omitted the default filename will be used.
 * janus-start-muted - Included in the *confifigure* request to indicate that the user should enter the room muted (no mechanism exists in the module to modify the mute status later).  The default value is that the user should not be muted.
+* janus-answer-on-participant-ready - When set, the SIP answer (and therefore any greeting played by the bridged leg) is deferred until another participant in the audiobridge room has negotiated its PeerConnection (`setup:true`). The module ignores its own participant id, so it waits for a genuinely remote peer (e.g. a WebRTC browser). This prevents the far end from speaking before the browser has joined and can hear audio. The default is disabled (answer as soon as the Janus leg is ready).
+* janus-answer-participant-timeout-ms - Fallback timeout (milliseconds) used with `janus-answer-on-participant-ready`: if no remote participant becomes ready within this window after the leg is otherwise answerable, the leg is answered anyway so a missing or failed peer cannot wedge the call. The default is 10000 (10 seconds).
 
 The dial string is composed of the following parts:
 ```
