@@ -67,7 +67,8 @@ switch_status_t apiClaimServerId(server_t *pServer, janus_id_t serverId);
 janus_id_t apiGetSenderId(server_t *pServer, const janus_id_t serverId, const char *callId);
 janus_id_t apiCreateRoom(server_t *pServer, const janus_id_t serverId,
 	const janus_id_t senderId, const janus_id_t roomId, const char *pDescription,
-	switch_bool_t record, const char *pRecordingFile, const char *pPin, const char *pRoomIdStr);
+	switch_bool_t record, const char *pRecordingFile, const char *pPin,
+	switch_bool_t allow_ws_participants, const char *pRoomIdStr);
 switch_status_t apiJoin(server_t *pServer, int hmacTokenTtl,
 	const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId,
 	const char *pDisplay, const char *pPin, const char *pToken, const char *callId, const char *pRoomIdStr);
