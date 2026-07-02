@@ -797,6 +797,7 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 						switch_channel_var_true(channel, "janus-room-record"),
 						switch_channel_get_variable(channel, "janus-room-record-file"),
 						switch_channel_get_variable(channel, "janus-room-pin"),
+						switch_channel_var_true(channel, "janus-room-allow-ws-participants"),
 						tech_pvt->pRoomIdStr) == 0) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Failed to create room\n");
 			switch_channel_hangup(channel, SWITCH_CAUSE_INCOMPATIBLE_DESTINATION);

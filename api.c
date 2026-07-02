@@ -824,7 +824,8 @@ janus_id_t apiGetSenderId(server_t *pServer, const janus_id_t serverId, const ch
 
 janus_id_t apiCreateRoom(server_t *pServer, const janus_id_t serverId,
 		const janus_id_t senderId, const janus_id_t roomId, const char *pDescription,
-		switch_bool_t record, const char *pRecordingFile, const char *pPin, const char *pRoomIdStr) {
+		switch_bool_t record, const char *pRecordingFile, const char *pPin,
+		switch_bool_t allow_ws_participants, const char *pRoomIdStr) {
 	message_t request, *pResponse = NULL;
 	janus_id_t result = 0;
 
@@ -892,6 +893,13 @@ janus_id_t apiCreateRoom(server_t *pServer, const janus_id_t serverId,
 	if (pRecordingFile) {
 		if (cJSON_AddStringToObject(request.pJsonBody, "record_file", pRecordingFile) == NULL) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create string (body.record_file)\n");
+			goto done;
+		}
+	}
+
+	if (allow_ws_participants) {
+		if (cJSON_AddBoolToObject(request.pJsonBody, "allow_ws_participants", cJSON_True) == NULL) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Cannot create boolean (body.allow_ws_participants)\n");
 			goto done;
 		}
 	}
