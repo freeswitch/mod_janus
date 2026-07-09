@@ -52,7 +52,11 @@ typedef struct {
   /* Optional url-template: expand {pod} in pod-url-template at dial time. */
   char *pod_url_template;
   unsigned int pod_server_max;
+  unsigned int pod_server_idle_sec;
+  unsigned int pod_server_fail_max;
   server_t *pod_defaults;
+  switch_thread_t *dynamic_sweep_thread;
+  switch_bool_t dynamic_sweep_terminating;
 } globals_t;
 
 // define as a macro so we can eliminate one nested function

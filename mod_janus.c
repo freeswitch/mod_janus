@@ -529,6 +529,8 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 	server_t *pServer = (server_t *) pObj;
 	janus_id_t serverId = 0;
 	int outer_reconnect_delay = 0;
+	switch_bool_t evict_idle = SWITCH_FALSE;
+	switch_bool_t evict_fail = SWITCH_FALSE;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Thread started - server=%s\n", pServer->name);
 
@@ -611,7 +613,17 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 					janus_ws_server_close(pServer);
 				}
 #endif
+				if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+					serversDynamicRecordConnectFailure(pServer);
+					if (serversDynamicEvictable(pServer, &evict_idle, &evict_fail) && evict_fail) {
+						switch_set_flag(pServer, SFLAG_EVICTED);
+						goto thread_done;
+					}
+				}
 			} else {
+				if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+					serversDynamicResetConnectFailures(pServer);
+				}
 				switch_mutex_lock(pServer->mutex);
 				pServer->started = switch_time_now();
 				pServer->serverId = serverId;
@@ -653,6 +665,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 			}
 		}
 	}
+thread_done:
 	(void) hashDestroy(&pServer->senderIdLookup);
 
 	(void) hashDelete(&globals.serverIdLookup, serverId);
@@ -662,6 +675,10 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 		janus_ws_server_close(pServer);
 	}
 #endif
+
+	if (switch_test_flag(pServer, SFLAG_EVICTED)) {
+		serversDynamicRemoveFromLookup(pServer);
+	}
 
 	return NULL;
 }
@@ -716,6 +733,101 @@ static void stopServerThread(server_t *pServer) {
 	} else {
 		switch_mutex_unlock(pServer->flag_mutex);
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s is already disabled\n", pServer->name);
+	}
+}
+
+static void evict_dynamic_server(server_t *pServer, const char *reason)
+{
+	switch_bool_t idle = SWITCH_FALSE;
+	switch_bool_t fail = SWITCH_FALSE;
+
+	switch_assert(pServer);
+
+	if (!serversDynamicEvictable(pServer, &idle, &fail)) {
+		return;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"Evicting dynamic server=%s (%s)\n", pServer->name, reason ? reason : "idle");
+
+	switch_set_flag(pServer, SFLAG_EVICTED);
+	stopServerThread(pServer);
+}
+
+static void *SWITCH_THREAD_FUNC dynamic_servers_sweep_run(switch_thread_t *pThread, void *pObj)
+{
+	(void) pThread;
+	(void) pObj;
+
+	while (!globals.dynamic_sweep_terminating) {
+		switch_hash_index_t *pIndex = NULL;
+		server_t *pServer;
+		switch_bool_t idle = SWITCH_FALSE;
+		switch_bool_t fail = SWITCH_FALSE;
+		const char *reason = NULL;
+
+		switch_yield(30000000);
+
+		if (globals.dynamic_sweep_terminating || zstr(globals.pod_url_template)) {
+			break;
+		}
+
+		while ((pServer = serversIterate(&pIndex)) != NULL) {
+			if (!switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+				continue;
+			}
+
+			idle = SWITCH_FALSE;
+			fail = SWITCH_FALSE;
+			if (!serversDynamicEvictable(pServer, &idle, &fail)) {
+				continue;
+			}
+
+			if (fail) {
+				reason = "connect failures";
+			} else if (idle) {
+				reason = "idle timeout";
+			} else {
+				continue;
+			}
+
+			evict_dynamic_server(pServer, reason);
+		}
+	}
+
+	return NULL;
+}
+
+static void startDynamicServersSweep(void)
+{
+	switch_threadattr_t *pThreadAttr = NULL;
+
+	if (globals.dynamic_sweep_thread || zstr(globals.pod_url_template)) {
+		return;
+	}
+
+	globals.dynamic_sweep_terminating = SWITCH_FALSE;
+	switch_threadattr_create(&pThreadAttr, globals.pModulePool);
+	switch_threadattr_stacksize_set(pThreadAttr, SWITCH_THREAD_STACKSIZE);
+	switch_thread_create(&globals.dynamic_sweep_thread, pThreadAttr, dynamic_servers_sweep_run, NULL, globals.pModulePool);
+}
+
+static void stopDynamicServersSweep(void)
+{
+	switch_status_t status;
+	switch_status_t returnValue;
+
+	if (!globals.dynamic_sweep_thread) {
+		return;
+	}
+
+	globals.dynamic_sweep_terminating = SWITCH_TRUE;
+	status = switch_thread_join(&returnValue, globals.dynamic_sweep_thread);
+	globals.dynamic_sweep_thread = NULL;
+
+	if (status != SWITCH_STATUS_SUCCESS || returnValue != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Dynamic server sweep thread join status=%d return=%d\n", status, returnValue);
 	}
 }
 
@@ -811,6 +923,10 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	pServer->callsInProgress ++;
 	pServer->totalCalls ++;
 	switch_mutex_unlock(pServer->mutex);
+
+	if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+		serversDynamicRecordActivity(pServer);
+	}
 
 	switch_mutex_lock(globals.mutex);
 	globals.callsInProgress ++;
@@ -999,6 +1115,10 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 		pServer->callsInProgress --;
 	}
 	switch_mutex_unlock(pServer->mutex);
+
+	if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+		serversDynamicRecordActivity(pServer);
+	}
 
 	switch_mutex_lock(globals.mutex);
 	if (globals.callsInProgress > 0) {
@@ -1457,14 +1577,27 @@ static switch_status_t load_config(void)
 				globals.pod_url_template = switch_core_strdup(globals.pModulePool, pValStr);
 			} else if (!strcmp(pVarStr, "pod-server-max") && !zstr(pValStr)) {
 				globals.pod_server_max = (unsigned int) atoi(pValStr);
+			} else if (!strcmp(pVarStr, "pod-server-idle-sec") && !zstr(pValStr)) {
+				globals.pod_server_idle_sec = (unsigned int) atoi(pValStr);
+			} else if (!strcmp(pVarStr, "pod-server-fail-max") && !zstr(pValStr)) {
+				globals.pod_server_fail_max = (unsigned int) atoi(pValStr);
 			}
 		}
 	}
 
 	if (globals.pod_url_template) {
+		if (!globals.pod_server_max) {
+			globals.pod_server_max = 64;
+		}
+		if (!globals.pod_server_idle_sec) {
+			globals.pod_server_idle_sec = 600;
+		}
+		if (!globals.pod_server_fail_max) {
+			globals.pod_server_fail_max = 12;
+		}
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-			"pod-url-template enabled (max dynamic servers=%u)\n",
-			globals.pod_server_max ? globals.pod_server_max : 64);
+			"pod-url-template enabled (max dynamic servers=%u idle=%us fail=%u)\n",
+			globals.pod_server_max, globals.pod_server_idle_sec, globals.pod_server_fail_max);
 	}
 
 	xmlint = switch_xml_child(cfg, "server");
@@ -1538,6 +1671,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_janus_load)
 		}
 	}
 
+	startDynamicServersSweep();
+
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Janus - Loaded\n");
 
 	/* indicate that the module should continue to be loaded */
@@ -1555,6 +1690,8 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown)
 {
 	switch_hash_index_t *pIndex = NULL;
   server_t *pServer;
+
+  stopDynamicServersSweep();
 
   while ((pServer = serversIterate(&pIndex)) != NULL) {
 		stopServerThread(pServer);

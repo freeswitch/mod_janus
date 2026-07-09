@@ -335,6 +335,8 @@ server_t *serversEnsureFromTemplate(const char *pod_name) {
 	pServer->transport = JANUS_TP_HTTP;
 	pServer->janus_ws_handle = NULL;
 	pServer->ws_last_poll = 0;
+	pServer->last_activity = switch_time_now();
+	pServer->connect_failures = 0;
 	pServer->name = switch_core_strdup(globals.pModulePool, pod_name);
 	pServer->pUrl = pUrl;
 
@@ -347,6 +349,121 @@ server_t *serversEnsureFromTemplate(const char *pod_name) {
 
 	switch_core_hash_insert(globals.pServerNameLookup, pServer->name, pServer);
 	return pServer;
+}
+
+void serversDynamicRecordActivity(server_t *pServer)
+{
+	switch_assert(pServer);
+
+	switch_mutex_lock(pServer->mutex);
+	pServer->last_activity = switch_time_now();
+	switch_mutex_unlock(pServer->mutex);
+}
+
+void serversDynamicRecordConnectFailure(server_t *pServer)
+{
+	switch_assert(pServer);
+
+	switch_mutex_lock(pServer->mutex);
+	pServer->connect_failures++;
+	switch_mutex_unlock(pServer->mutex);
+}
+
+void serversDynamicResetConnectFailures(server_t *pServer)
+{
+	switch_assert(pServer);
+
+	switch_mutex_lock(pServer->mutex);
+	pServer->connect_failures = 0;
+	pServer->last_activity = switch_time_now();
+	switch_mutex_unlock(pServer->mutex);
+}
+
+switch_bool_t serversDynamicEvictable(server_t *pServer, switch_bool_t *pIdle, switch_bool_t *pFail)
+{
+	unsigned int calls;
+	unsigned int failures;
+	janus_id_t serverId;
+	switch_time_t last;
+	switch_time_t idle_usec;
+	switch_bool_t idle = SWITCH_FALSE;
+	switch_bool_t fail = SWITCH_FALSE;
+
+	switch_assert(pServer);
+
+	if (!switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+		return SWITCH_FALSE;
+	}
+
+	switch_mutex_lock(pServer->mutex);
+	calls = pServer->callsInProgress;
+	failures = pServer->connect_failures;
+	serverId = pServer->serverId;
+	last = pServer->last_activity;
+	switch_mutex_unlock(pServer->mutex);
+
+	if (calls > 0) {
+		return SWITCH_FALSE;
+	}
+
+	if (globals.pod_server_fail_max && failures >= globals.pod_server_fail_max && !serverId) {
+		fail = SWITCH_TRUE;
+	}
+
+	if (globals.pod_server_idle_sec) {
+		idle_usec = (switch_time_t) globals.pod_server_idle_sec * 1000000;
+		if ((switch_time_now() - last) >= idle_usec) {
+			idle = SWITCH_TRUE;
+		}
+	}
+
+	if (pIdle) {
+		*pIdle = idle;
+	}
+	if (pFail) {
+		*pFail = fail;
+	}
+
+	return idle || fail ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+void serversDynamicRemoveFromLookup(server_t *pServer)
+{
+	janus_id_t serverId = 0;
+	const char *name;
+
+	switch_assert(pServer);
+	switch_assert(globals.pServerNameLookup);
+
+	switch_mutex_lock(globals.mutex);
+
+	if (!switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+		switch_mutex_unlock(globals.mutex);
+		return;
+	}
+
+	name = pServer->name;
+	if (!name || !switch_core_hash_find(globals.pServerNameLookup, name)) {
+		switch_mutex_unlock(globals.mutex);
+		return;
+	}
+
+	switch_mutex_lock(pServer->mutex);
+	serverId = pServer->serverId;
+	pServer->serverId = 0;
+	switch_mutex_unlock(pServer->mutex);
+
+	if (serverId) {
+		(void) hashDelete(&globals.serverIdLookup, serverId);
+	}
+
+	switch_core_hash_delete(globals.pServerNameLookup, name);
+	switch_clear_flag_locked(pServer, SFLAG_ENABLED);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"Evicted dynamic server=%s\n", name);
+
+	switch_mutex_unlock(globals.mutex);
 }
 
 switch_status_t serversSummary(switch_stream_handle_t *pStream) {
