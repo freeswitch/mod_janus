@@ -48,6 +48,11 @@ typedef struct {
   unsigned int callsInProgress;
   char guess_ip[80];
   switch_bool_t auto_nat;
+
+  /* Optional url-template: expand {pod} in pod-url-template at dial time. */
+  char *pod_url_template;
+  unsigned int pod_server_max;
+  server_t *pod_defaults;
 } globals_t;
 
 // define as a macro so we can eliminate one nested function

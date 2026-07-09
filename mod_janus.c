@@ -1211,6 +1211,56 @@ static switch_status_t channel_receive_message(switch_core_session_t *session, s
 /* Make sure when you have 2 sessions in the same scope that you pass the appropriate one to the routines
    that allocate memory or you will have 1 channel with memory allocated from another channel's pool!
 */
+static server_t *waitServerActive(server_t *pTmpServer, int timeout_ms)
+{
+	int waited = 0;
+	server_t *pServer;
+	janus_id_t serverId;
+
+	while (waited < timeout_ms) {
+		switch_mutex_lock(pTmpServer->mutex);
+		serverId = pTmpServer->serverId;
+		switch_mutex_unlock(pTmpServer->mutex);
+
+		if (serverId && (pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
+			return pServer;
+		}
+
+		switch_yield(100000);
+		waited += 100;
+	}
+
+	return NULL;
+}
+
+static server_t *resolveServerForDial(const char *pServerName, switch_core_session_t *session)
+{
+	server_t *pTmpServer;
+
+	pTmpServer = serversFind(pServerName);
+	if (!pTmpServer && !zstr(globals.pod_url_template)) {
+		switch_mutex_lock(globals.mutex);
+		pTmpServer = serversFind(pServerName);
+		if (!pTmpServer) {
+			pTmpServer = serversEnsureFromTemplate(pServerName);
+			if (pTmpServer) {
+				startServerThread(pTmpServer, SWITCH_TRUE);
+			}
+		}
+		switch_mutex_unlock(globals.mutex);
+	}
+
+	if (!pTmpServer) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Unknown server=%s\n", pServerName);
+		return NULL;
+	}
+
+	DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Found server=%s serverId=%" SWITCH_UINT64_T_FMT "\n",
+		pTmpServer->name, pTmpServer->serverId);
+
+	return waitServerActive(pTmpServer, 10000);
+}
+
 static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *session, switch_event_t *var_event,
 													switch_caller_profile_t *outbound_profile,
 													switch_core_session_t **new_session, switch_memory_pool_t **pool, switch_originate_flag_t flags,
@@ -1225,7 +1275,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	switch_channel_t *channel;
 	switch_caller_profile_t *caller_profile;
 	switch_call_cause_t status = SWITCH_CAUSE_SUCCESS;
-	server_t *pTmpServer, *pServer;
+	server_t *pServer;
 
 	// this check has been disabled due to the fact that FreeSWITCH crashes in some cases
 	// if (isVideoCall(session)) {
@@ -1269,16 +1319,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	*pNext ++ = '\0';
 	pServerName = pDialStr;
 
-	if (!(pTmpServer = serversFind(pServerName))) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Unknown server=%s\n", pServerName);
-		status = SWITCH_CAUSE_NO_ROUTE_DESTINATION;
-		goto error;
-	}
-	DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Found serverId=%" SWITCH_UINT64_T_FMT "\n", pTmpServer->serverId);
-
-	// check that the server is available via the serverIdLookup map - ie. that it is active
-	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, pTmpServer->serverId))) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", pTmpServer->serverId);
+	if (!(pServer = resolveServerForDial(pServerName, session))) {
 		status = SWITCH_CAUSE_NO_ROUTE_DESTINATION;
 		goto error;
 	}
@@ -1412,8 +1453,18 @@ static switch_status_t load_config(void)
 
 			if (!strcmp(pVarStr, "debug")) {
 				globals.debug = switch_true(pValStr);
+			} else if (!strcmp(pVarStr, "pod-url-template") && !zstr(pValStr)) {
+				globals.pod_url_template = switch_core_strdup(globals.pModulePool, pValStr);
+			} else if (!strcmp(pVarStr, "pod-server-max") && !zstr(pValStr)) {
+				globals.pod_server_max = (unsigned int) atoi(pValStr);
 			}
 		}
+	}
+
+	if (globals.pod_url_template) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+			"pod-url-template enabled (max dynamic servers=%u)\n",
+			globals.pod_server_max ? globals.pod_server_max : 64);
 	}
 
 	xmlint = switch_xml_child(cfg, "server");

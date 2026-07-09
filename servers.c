@@ -198,7 +198,155 @@ switch_status_t serversAdd(switch_xml_t xmlint) {
 
 	switch_core_hash_insert(globals.pServerNameLookup, pName, pServer);
 
+	if (!globals.pod_defaults) {
+		(void) serversCaptureDefaults(pServer);
+	}
+
 	return SWITCH_STATUS_SUCCESS;
+}
+
+static void serverCloneDefaults(server_t *dst, const server_t *src) {
+	dst->codec_string = src->codec_string;
+	dst->local_network = src->local_network;
+	dst->extrtpip = src->extrtpip;
+	dst->rtpip = src->rtpip;
+	dst->rtpip6 = src->rtpip6;
+	dst->pSecret = src->pSecret;
+	dst->pAuthToken = src->pAuthToken;
+	dst->pHmacSecret = src->pHmacSecret;
+	dst->cand_acl_count = src->cand_acl_count;
+	for (uint32_t i = 0; i < src->cand_acl_count; i++) {
+		dst->cand_acl[i] = src->cand_acl[i];
+	}
+	if (switch_test_flag((server_t *) src, SFLAG_AUTO_NAT)) {
+		switch_set_flag(dst, SFLAG_AUTO_NAT);
+	}
+}
+
+switch_status_t serversCaptureDefaults(server_t *pServer) {
+	switch_assert(pServer);
+
+	if (!globals.pod_defaults) {
+		globals.pod_defaults = switch_core_alloc(globals.pModulePool, sizeof(*globals.pod_defaults));
+	}
+	serverCloneDefaults(globals.pod_defaults, pServer);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+switch_bool_t serversPodNameValid(const char *pod_name) {
+	size_t len;
+	const char *p;
+
+	if (zstr(pod_name)) {
+		return SWITCH_FALSE;
+	}
+
+	len = strlen(pod_name);
+	if (len > 63) {
+		return SWITCH_FALSE;
+	}
+
+	for (p = pod_name; *p; p++) {
+		if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-')) {
+			return SWITCH_FALSE;
+		}
+	}
+
+	if (pod_name[0] == '-' || pod_name[len - 1] == '-') {
+		return SWITCH_FALSE;
+	}
+
+	return SWITCH_TRUE;
+}
+
+static unsigned int serversDynamicCount(void) {
+	switch_hash_index_t *pIndex = NULL;
+	server_t *pServer;
+	unsigned int count = 0;
+
+	while ((pServer = serversIterate(&pIndex)) != NULL) {
+		if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+			count++;
+		}
+	}
+	return count;
+}
+
+static char *serversExpandPodUrl(const char *pod_name) {
+	char *expanded;
+	const char *placeholder = "{pod}";
+	const char *start, *match;
+	size_t prefix_len, pod_len, total;
+
+	switch_assert(globals.pod_url_template);
+
+	start = globals.pod_url_template;
+	match = strstr(start, placeholder);
+	if (!match) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+			"pod-url-template missing {pod} placeholder: %s\n", globals.pod_url_template);
+		return NULL;
+	}
+
+	prefix_len = (size_t) (match - start);
+	pod_len = strlen(pod_name);
+	total = prefix_len + pod_len + strlen(match + strlen(placeholder)) + 1;
+
+	expanded = switch_core_alloc(globals.pModulePool, total);
+	(void) snprintf(expanded, total, "%.*s%s%s", (int) prefix_len, start, pod_name, match + strlen(placeholder));
+	return expanded;
+}
+
+server_t *serversEnsureFromTemplate(const char *pod_name) {
+	server_t *pServer;
+	char *pUrl;
+	unsigned int max_servers;
+
+	if (zstr(globals.pod_url_template) || !globals.pod_defaults) {
+		return NULL;
+	}
+
+	if (!serversPodNameValid(pod_name)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Rejecting invalid server name=%s\n", pod_name);
+		return NULL;
+	}
+
+	max_servers = globals.pod_server_max ? globals.pod_server_max : 64;
+	if (serversDynamicCount() >= max_servers) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Dynamic server limit reached (%u); cannot add server=%s\n", max_servers, pod_name);
+		return NULL;
+	}
+
+	pUrl = serversExpandPodUrl(pod_name);
+	if (!pUrl) {
+		return NULL;
+	}
+
+	pServer = switch_core_alloc(globals.pModulePool, sizeof(*pServer));
+	switch_mutex_init(&pServer->mutex, SWITCH_MUTEX_NESTED, globals.pModulePool);
+	switch_mutex_init(&pServer->flag_mutex, SWITCH_MUTEX_NESTED, globals.pModulePool);
+
+	pServer->serverId = 0;
+	pServer->totalCalls = 0;
+	pServer->callsInProgress = 0;
+	pServer->pThread = NULL;
+	pServer->transport = JANUS_TP_HTTP;
+	pServer->janus_ws_handle = NULL;
+	pServer->ws_last_poll = 0;
+	pServer->name = switch_core_strdup(globals.pModulePool, pod_name);
+	pServer->pUrl = pUrl;
+
+	serverCloneDefaults(pServer, globals.pod_defaults);
+	switch_set_flag(pServer, SFLAG_ENABLED);
+	switch_set_flag(pServer, SFLAG_DYNAMIC);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"Created dynamic Janus server=%s url=%s\n", pod_name, pUrl);
+
+	switch_core_hash_insert(globals.pServerNameLookup, pServer->name, pServer);
+	return pServer;
 }
 
 switch_status_t serversSummary(switch_stream_handle_t *pStream) {

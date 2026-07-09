@@ -39,7 +39,8 @@
 typedef enum {
 	SFLAG_ENABLED        = (1 << 0),
 	SFLAG_TERMINATING    = (1 << 1),
-	SFLAG_AUTO_NAT       = (1 << 2)
+	SFLAG_AUTO_NAT       = (1 << 2),
+	SFLAG_DYNAMIC        = (1 << 3)
 } SFLAGS;
 
 typedef enum {
@@ -93,6 +94,9 @@ typedef struct server_s {
 
 switch_status_t serversList(const char *pLine, const char *pCursor, switch_console_callback_match_t **matches);
 switch_status_t serversAdd(switch_xml_t xmlint);
+switch_status_t serversCaptureDefaults(server_t *pServer);
+switch_bool_t serversPodNameValid(const char *pod_name);
+server_t *serversEnsureFromTemplate(const char *pod_name);
 switch_status_t serversSummary(switch_stream_handle_t *pStream);
 server_t *serversFind(const char * const pName);
 server_t *serversIterate(switch_hash_index_t **pIndex);
