@@ -36,6 +36,8 @@
 #include  "switch.h"
 #include  "hash.h"
 
+typedef struct server_s server_t;
+
 typedef struct {
   switch_memory_pool_t *pModulePool;
   int debug;
