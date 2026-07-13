@@ -32,6 +32,11 @@
  */
 #include  "globals.h"
 #include  "servers.h"
+#include  "http.h"
+
+#include  <arpa/inet.h>
+#include  <netdb.h>
+#include  <sys/socket.h>
 
 switch_status_t serversList(const char *pLine, const char *pCursor, switch_console_callback_match_t **matches) {
 	switch_hash_index_t *pIndex = NULL;
@@ -297,6 +302,267 @@ static char *serversExpandPodUrl(const char *pod_name) {
 	return expanded;
 }
 
+static switch_bool_t serversParseHttpUrlParts(const char *url, char *host, size_t host_size, char *port, size_t port_size,
+	char *path, size_t path_size)
+{
+	const char *p;
+	const char *host_start;
+	const char *host_end;
+	const char *default_port = "80";
+
+	if (zstr(url) || !host || host_size == 0) {
+		return SWITCH_FALSE;
+	}
+
+	p = url;
+	if (!strncmp(p, "http://", 7)) {
+		p += 7;
+		default_port = "80";
+	} else if (!strncmp(p, "https://", 8)) {
+		p += 8;
+		default_port = "443";
+	} else {
+		return SWITCH_FALSE;
+	}
+
+	host_start = p;
+	host_end = strpbrk(p, ":/");
+	if (!host_end) {
+		host_end = p + strlen(p);
+	}
+
+	if ((size_t) (host_end - host_start) >= host_size) {
+		return SWITCH_FALSE;
+	}
+
+	memcpy(host, host_start, (size_t) (host_end - host_start));
+	host[host_end - host_start] = '\0';
+
+	if (*host_end == ':') {
+		const char *port_start = host_end + 1;
+		const char *port_end = strchr(port_start, '/');
+		size_t port_len;
+
+		if (!port_end) {
+			port_end = port_start + strlen(port_start);
+		}
+
+		port_len = (size_t) (port_end - port_start);
+		if (port && port_size > 0) {
+			if (port_len >= port_size) {
+				return SWITCH_FALSE;
+			}
+			memcpy(port, port_start, port_len);
+			port[port_len] = '\0';
+		}
+
+		if (path && path_size > 0) {
+			if (*port_end == '/') {
+				switch_copy_string(path, port_end, path_size);
+			} else {
+				path[0] = '\0';
+			}
+		}
+	} else {
+		if (port && port_size > 0) {
+			switch_copy_string(port, default_port, port_size);
+		}
+		if (path && path_size > 0) {
+			if (*host_end == '/') {
+				switch_copy_string(path, host_end, path_size);
+			} else {
+				path[0] = '\0';
+			}
+		}
+	}
+
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t serversHostnameResolves(const char *hostname)
+{
+	struct addrinfo hints, *res;
+	int rc;
+
+	if (zstr(hostname)) {
+		return SWITCH_FALSE;
+	}
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+
+	rc = getaddrinfo(hostname, NULL, &hints, &res);
+	if (rc != 0) {
+		return SWITCH_FALSE;
+	}
+
+	freeaddrinfo(res);
+	return SWITCH_TRUE;
+}
+
+static switch_bool_t serversExtractHeadlessFromTemplate(char *headless_host, size_t headless_host_size, char *port,
+	size_t port_size, char *path, size_t path_size)
+{
+	const char *marker = "{pod}.";
+	const char *start;
+	const char *end;
+
+	switch_assert(globals.pod_url_template);
+
+	start = strstr(globals.pod_url_template, marker);
+	if (!start) {
+		return SWITCH_FALSE;
+	}
+
+	start += strlen(marker);
+	end = strpbrk(start, ":/");
+	if (!end) {
+		return SWITCH_FALSE;
+	}
+
+	if ((size_t) (end - start) >= headless_host_size) {
+		return SWITCH_FALSE;
+	}
+
+	memcpy(headless_host, start, (size_t) (end - start));
+	headless_host[end - start] = '\0';
+
+	if (*end == ':') {
+		const char *port_start = end + 1;
+		const char *port_end = strchr(port_start, '/');
+		size_t port_len;
+
+		if (!port_end) {
+			port_end = port_start + strlen(port_start);
+		}
+
+		port_len = (size_t) (port_end - port_start);
+		if (port_len >= port_size) {
+			return SWITCH_FALSE;
+		}
+		memcpy(port, port_start, port_len);
+		port[port_len] = '\0';
+
+		if (path && path_size > 0) {
+			if (*port_end == '/') {
+				switch_copy_string(path, port_end, path_size);
+			} else {
+				path[0] = '\0';
+			}
+		}
+	} else if (path && path_size > 0) {
+		switch_copy_string(path, end, path_size);
+		if (port && port_size > 0) {
+			switch_copy_string(port, "8088", port_size);
+		}
+	}
+
+	return SWITCH_TRUE;
+}
+
+static char *serversDiscoverPodUrlViaHeadless(const char *pod_name)
+{
+	char headless_host[256];
+	char port[16];
+	char path[128];
+	struct addrinfo hints, *res, *rp;
+	char *resolved = NULL;
+
+	if (!serversExtractHeadlessFromTemplate(headless_host, sizeof(headless_host), port, sizeof(port), path,
+			sizeof(path))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"pod-url-template missing {pod}. prefix; cannot probe headless endpoints\n");
+		return NULL;
+	}
+
+	if (zstr(path)) {
+		switch_copy_string(path, "/janus", sizeof(path));
+	}
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+
+	if (getaddrinfo(headless_host, NULL, &hints, &res) != 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Headless service DNS lookup failed for %s\n", headless_host);
+		return NULL;
+	}
+
+	for (rp = res; rp && !resolved; rp = rp->ai_next) {
+		char ip[INET_ADDRSTRLEN];
+		char info_url[512];
+		char janus_url[512];
+		cJSON *json;
+		cJSON *server_name;
+
+		if (rp->ai_family != AF_INET) {
+			continue;
+		}
+
+		if (!inet_ntop(AF_INET, &((struct sockaddr_in *) rp->ai_addr)->sin_addr, ip, sizeof(ip))) {
+			continue;
+		}
+
+		(void) snprintf(info_url, sizeof(info_url), "http://%s:%s%s/info", ip, port, path);
+		json = httpGet(info_url, 2000);
+		if (!json) {
+			continue;
+		}
+
+		server_name = cJSON_GetObjectItemCaseSensitive(json, "server-name");
+		if (cJSON_IsString(server_name) && server_name->valuestring &&
+				!strcmp(server_name->valuestring, pod_name)) {
+			(void) snprintf(janus_url, sizeof(janus_url), "http://%s:%s%s", ip, port, path);
+			resolved = switch_core_strdup(globals.pModulePool, janus_url);
+		}
+
+		cJSON_Delete(json);
+	}
+
+	freeaddrinfo(res);
+
+	if (resolved) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+			"Resolved Janus pod=%s via headless endpoint discovery url=%s\n", pod_name, resolved);
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"No headless Janus endpoint matched pod=%s (service=%s)\n", pod_name, headless_host);
+	}
+
+	return resolved;
+}
+
+static char *serversResolvePodUrl(const char *pod_name)
+{
+	char *expanded;
+	char host[256];
+	char port[16];
+	char path[128];
+	char *discovered;
+
+	expanded = serversExpandPodUrl(pod_name);
+	if (!expanded) {
+		return NULL;
+	}
+
+	if (serversParseHttpUrlParts(expanded, host, sizeof(host), port, sizeof(port), path, sizeof(path)) &&
+			serversHostnameResolves(host)) {
+		return expanded;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"Pod hostname DNS unavailable for %s; probing headless Janus endpoints\n", host);
+
+	discovered = serversDiscoverPodUrlViaHeadless(pod_name);
+	if (discovered) {
+		return discovered;
+	}
+
+	return expanded;
+}
+
 server_t *serversEnsureFromTemplate(const char *pod_name) {
 	server_t *pServer;
 	char *pUrl;
@@ -319,7 +585,7 @@ server_t *serversEnsureFromTemplate(const char *pod_name) {
 		return NULL;
 	}
 
-	pUrl = serversExpandPodUrl(pod_name);
+	pUrl = serversResolvePodUrl(pod_name);
 	if (!pUrl) {
 		return NULL;
 	}
