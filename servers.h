@@ -39,7 +39,9 @@
 typedef enum {
 	SFLAG_ENABLED        = (1 << 0),
 	SFLAG_TERMINATING    = (1 << 1),
-	SFLAG_AUTO_NAT       = (1 << 2)
+	SFLAG_AUTO_NAT       = (1 << 2),
+	SFLAG_DYNAMIC        = (1 << 3),
+	SFLAG_EVICTED        = (1 << 4)
 } SFLAGS;
 
 typedef enum {
@@ -58,6 +60,7 @@ typedef struct server_s {
 	 * well as to the audiobridge join body so that per-room signed_tokens
 	 * enforcement (PR #3635) accepts them. */
 	char *pHmacSecret;
+	char *pod_ip;
 	switch_thread_t *pThread;
 
 	char *local_network;
@@ -89,10 +92,24 @@ typedef struct server_s {
 	janus_transport_t transport;
 	void *janus_ws_handle; /* janus_ws_ctx_t when transport == JANUS_TP_WS */
 	switch_time_t ws_last_poll; /* WebSocket keepalive / activity timestamp */
+	switch_time_t last_activity; /* last use or successful Janus contact (dynamic servers) */
+	unsigned int connect_failures; /* consecutive REST connect/register failures */
 } server_t;
 
 switch_status_t serversList(const char *pLine, const char *pCursor, switch_console_callback_match_t **matches);
 switch_status_t serversAdd(switch_xml_t xmlint);
+switch_status_t serversCaptureDefaults(server_t *pServer);
+switch_bool_t serversPodNameValid(const char *pod_name);
+void serversBindStartThread(void (*start_fn)(server_t *pServer, switch_bool_t wait_for_active));
+void serversBindStopThread(void (*stop_fn)(server_t *pServer));
+switch_status_t serversRegistryRefresh(void);
+void serversStartRegistry(void);
+void serversStopRegistry(void);
+void serversDynamicRecordActivity(server_t *pServer);
+void serversDynamicRecordConnectFailure(server_t *pServer);
+void serversDynamicResetConnectFailures(server_t *pServer);
+switch_bool_t serversDynamicEvictable(server_t *pServer, switch_bool_t *pIdle, switch_bool_t *pFail);
+void serversDynamicRemoveFromLookup(server_t *pServer);
 switch_status_t serversSummary(switch_stream_handle_t *pStream);
 server_t *serversFind(const char * const pName);
 server_t *serversIterate(switch_hash_index_t **pIndex);

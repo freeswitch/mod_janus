@@ -529,6 +529,8 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 	server_t *pServer = (server_t *) pObj;
 	janus_id_t serverId = 0;
 	int outer_reconnect_delay = 0;
+	switch_bool_t evict_idle = SWITCH_FALSE;
+	switch_bool_t evict_fail = SWITCH_FALSE;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Thread started - server=%s\n", pServer->name);
 
@@ -611,7 +613,17 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 					janus_ws_server_close(pServer);
 				}
 #endif
+				if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+					serversDynamicRecordConnectFailure(pServer);
+					if (serversDynamicEvictable(pServer, &evict_idle, &evict_fail) && evict_fail) {
+						switch_set_flag(pServer, SFLAG_EVICTED);
+						goto thread_done;
+					}
+				}
 			} else {
+				if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+					serversDynamicResetConnectFailures(pServer);
+				}
 				switch_mutex_lock(pServer->mutex);
 				pServer->started = switch_time_now();
 				pServer->serverId = serverId;
@@ -653,6 +665,7 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 			}
 		}
 	}
+thread_done:
 	(void) hashDestroy(&pServer->senderIdLookup);
 
 	(void) hashDelete(&globals.serverIdLookup, serverId);
@@ -662,6 +675,10 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 		janus_ws_server_close(pServer);
 	}
 #endif
+
+	if (switch_test_flag(pServer, SFLAG_EVICTED)) {
+		serversDynamicRemoveFromLookup(pServer);
+	}
 
 	return NULL;
 }
@@ -715,7 +732,11 @@ static void stopServerThread(server_t *pServer) {
 		switch_clear_flag_locked(pServer, SFLAG_TERMINATING | SFLAG_ENABLED);
 	} else {
 		switch_mutex_unlock(pServer->flag_mutex);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s is already disabled\n", pServer->name);
+		if (switch_test_flag(pServer, SFLAG_EVICTED)) {
+			serversDynamicRemoveFromLookup(pServer);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s is already disabled\n", pServer->name);
+		}
 	}
 }
 
@@ -811,6 +832,10 @@ static switch_status_t channel_on_init(switch_core_session_t *session)
 	pServer->callsInProgress ++;
 	pServer->totalCalls ++;
 	switch_mutex_unlock(pServer->mutex);
+
+	if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+		serversDynamicRecordActivity(pServer);
+	}
 
 	switch_mutex_lock(globals.mutex);
 	globals.callsInProgress ++;
@@ -999,6 +1024,10 @@ static switch_status_t channel_on_hangup(switch_core_session_t *session)
 		pServer->callsInProgress --;
 	}
 	switch_mutex_unlock(pServer->mutex);
+
+	if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+		serversDynamicRecordActivity(pServer);
+	}
 
 	switch_mutex_lock(globals.mutex);
 	if (globals.callsInProgress > 0) {
@@ -1211,6 +1240,49 @@ static switch_status_t channel_receive_message(switch_core_session_t *session, s
 /* Make sure when you have 2 sessions in the same scope that you pass the appropriate one to the routines
    that allocate memory or you will have 1 channel with memory allocated from another channel's pool!
 */
+static server_t *waitServerActive(server_t *pTmpServer, int timeout_ms)
+{
+	int waited = 0;
+	server_t *pServer;
+	janus_id_t serverId;
+
+	while (waited < timeout_ms) {
+		switch_mutex_lock(pTmpServer->mutex);
+		serverId = pTmpServer->serverId;
+		switch_mutex_unlock(pTmpServer->mutex);
+
+		if (serverId && (pServer = (server_t *) hashFind(&globals.serverIdLookup, serverId))) {
+			return pServer;
+		}
+
+		switch_yield(100000);
+		waited += 100;
+	}
+
+	return NULL;
+}
+
+static server_t *resolveServerForDial(const char *pServerName, switch_core_session_t *session)
+{
+	server_t *pTmpServer;
+
+	pTmpServer = serversFind(pServerName);
+	if (!pTmpServer && !zstr(globals.headless_service_url)) {
+		(void) serversRegistryRefresh();
+		pTmpServer = serversFind(pServerName);
+	}
+
+	if (!pTmpServer) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Unknown server=%s\n", pServerName);
+		return NULL;
+	}
+
+	DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Found server=%s serverId=%" SWITCH_UINT64_T_FMT "\n",
+		pTmpServer->name, pTmpServer->serverId);
+
+	return waitServerActive(pTmpServer, 10000);
+}
+
 static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *session, switch_event_t *var_event,
 													switch_caller_profile_t *outbound_profile,
 													switch_core_session_t **new_session, switch_memory_pool_t **pool, switch_originate_flag_t flags,
@@ -1225,7 +1297,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	switch_channel_t *channel;
 	switch_caller_profile_t *caller_profile;
 	switch_call_cause_t status = SWITCH_CAUSE_SUCCESS;
-	server_t *pTmpServer, *pServer;
+	server_t *pServer;
 
 	// this check has been disabled due to the fact that FreeSWITCH crashes in some cases
 	// if (isVideoCall(session)) {
@@ -1269,16 +1341,7 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	*pNext ++ = '\0';
 	pServerName = pDialStr;
 
-	if (!(pTmpServer = serversFind(pServerName))) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Unknown server=%s\n", pServerName);
-		status = SWITCH_CAUSE_NO_ROUTE_DESTINATION;
-		goto error;
-	}
-	DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Found serverId=%" SWITCH_UINT64_T_FMT "\n", pTmpServer->serverId);
-
-	// check that the server is available via the serverIdLookup map - ie. that it is active
-	if (!(pServer = (server_t *) hashFind(&globals.serverIdLookup, pTmpServer->serverId))) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "No server for serverId=%" SWITCH_UINT64_T_FMT "\n", pTmpServer->serverId);
+	if (!(pServer = resolveServerForDial(pServerName, session))) {
 		status = SWITCH_CAUSE_NO_ROUTE_DESTINATION;
 		goto error;
 	}
@@ -1392,6 +1455,34 @@ switch_io_routines_t janus_io_routines = {
 	/*.receive_event */ channel_receive_event
 };
 
+static char *normalize_headless_service_url(switch_memory_pool_t *pool, const char *configured)
+{
+	const char *placeholder = "{pod}.";
+	const char *match;
+	size_t prefix_len;
+	size_t total;
+
+	if (zstr(configured)) {
+		return NULL;
+	}
+
+	match = strstr(configured, placeholder);
+	if (!match) {
+		return switch_core_strdup(pool, configured);
+	}
+
+	prefix_len = (size_t) (match - configured);
+	total = prefix_len + strlen(match + strlen(placeholder)) + 1;
+
+	{
+		char *normalized = switch_core_alloc(pool, total);
+		(void) snprintf(normalized, total, "%.*s%s", (int) prefix_len, configured, match + strlen(placeholder));
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+			"Deprecated pod-url-template converted to headless-service-url: %s\n", normalized);
+		return normalized;
+	}
+}
+
 static switch_status_t load_config(void)
 {
 	char *cf = "janus.conf";
@@ -1412,8 +1503,26 @@ static switch_status_t load_config(void)
 
 			if (!strcmp(pVarStr, "debug")) {
 				globals.debug = switch_true(pValStr);
+			} else if ((!strcmp(pVarStr, "headless-service-url") || !strcmp(pVarStr, "pod-url-template")) && !zstr(pValStr)) {
+				globals.headless_service_url = normalize_headless_service_url(globals.pModulePool, pValStr);
+			} else if (!strcmp(pVarStr, "registry-refresh-sec") && !zstr(pValStr)) {
+				globals.registry_refresh_sec = (unsigned int) atoi(pValStr);
+			} else if (!strcmp(pVarStr, "pod-server-fail-max") && !zstr(pValStr)) {
+				globals.pod_server_fail_max = (unsigned int) atoi(pValStr);
 			}
 		}
+	}
+
+	if (globals.headless_service_url) {
+		if (!globals.registry_refresh_sec) {
+			globals.registry_refresh_sec = 30;
+		}
+		if (!globals.pod_server_fail_max) {
+			globals.pod_server_fail_max = 12;
+		}
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+			"headless-service-url enabled url=%s refresh=%us fail_max=%u\n",
+			globals.headless_service_url, globals.registry_refresh_sec, globals.pod_server_fail_max);
 	}
 
 	xmlint = switch_xml_child(cfg, "server");
@@ -1481,11 +1590,16 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_janus_load)
 		return SWITCH_STATUS_FALSE;
 	}
 
+	serversBindStartThread(startServerThread);
+	serversBindStopThread(stopServerThread);
+
 	while ((pServer = serversIterate(&pIndex))) {
-		if (switch_test_flag(pServer, SFLAG_ENABLED)) {
+		if (switch_test_flag(pServer, SFLAG_ENABLED) && !switch_test_flag(pServer, SFLAG_DYNAMIC)) {
 			startServerThread(pServer, SWITCH_TRUE);
 		}
 	}
+
+	serversStartRegistry();
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Janus - Loaded\n");
 
@@ -1504,6 +1618,8 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown)
 {
 	switch_hash_index_t *pIndex = NULL;
   server_t *pServer;
+
+  serversStopRegistry();
 
   while ((pServer = serversIterate(&pIndex)) != NULL) {
 		stopServerThread(pServer);

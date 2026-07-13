@@ -1,6 +1,14 @@
 <configuration name="janus.conf" description="Janus Endpoint">
   <settings>
     <param name="debug" value="false"/>
+    <!--
+      Optional headless-service registry: set headless-service-url to the
+      Kubernetes headless Service REST base (no {pod} placeholder).
+      mod_janus DNS-probes all pod IPs and registers server-name -> URL.
+    -->
+    <!-- <param name="headless-service-url" value="http://janus-headless.example.svc.cluster.local:8088/janus"/> -->
+    <!-- <param name="registry-refresh-sec" value="30"/> -->
+    <!-- <param name="pod-server-fail-max" value="12"/> -->
   </settings>
 
   <!--

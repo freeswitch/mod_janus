@@ -36,6 +36,8 @@
 #include  "switch.h"
 #include  "hash.h"
 
+typedef struct server_s server_t;
+
 typedef struct {
   switch_memory_pool_t *pModulePool;
   int debug;
@@ -48,6 +50,16 @@ typedef struct {
   unsigned int callsInProgress;
   char guess_ip[80];
   switch_bool_t auto_nat;
+
+  /* Headless Kubernetes service REST base (http://janus-headless.ns.svc:8088/janus). */
+  char *headless_service_url;
+  unsigned int registry_refresh_sec;
+  unsigned int pod_server_fail_max;
+  server_t *pod_defaults;
+  switch_thread_t *registry_thread;
+  switch_bool_t registry_terminating;
+  void (*start_server_thread)(server_t *pServer, switch_bool_t wait_for_active);
+  void (*stop_server_thread)(server_t *pServer);
 } globals_t;
 
 // define as a macro so we can eliminate one nested function
