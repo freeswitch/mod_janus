@@ -465,7 +465,9 @@ switch_status_t serversRegistryRefresh(void)
 	char path[128];
 	struct addrinfo hints, *res, *rp;
 	registry_endpoint_t endpoints[REGISTRY_MAX_ENDPOINTS];
+	server_t *evict_list[REGISTRY_MAX_ENDPOINTS];
 	int endpoint_count = 0;
+	int evict_count = 0;
 	switch_hash_t *seen_pods = NULL;
 	switch_hash_index_t *pIndex = NULL;
 	server_t *pServer;
@@ -568,6 +570,16 @@ switch_status_t serversRegistryRefresh(void)
 		}
 		switch_mutex_unlock(pServer->mutex);
 
+		if (evict_count < REGISTRY_MAX_ENDPOINTS) {
+			evict_list[evict_count++] = pServer;
+		}
+	}
+
+	switch_mutex_unlock(globals.mutex);
+	switch_core_hash_destroy(&seen_pods);
+
+	for (i = 0; i < evict_count; i++) {
+		pServer = evict_list[i];
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 			"Removing headless Janus pod=%s from registry\n", pServer->name);
 		switch_set_flag(pServer, SFLAG_EVICTED);
@@ -577,9 +589,6 @@ switch_status_t serversRegistryRefresh(void)
 			serversDynamicRemoveFromLookup(pServer);
 		}
 	}
-
-	switch_mutex_unlock(globals.mutex);
-	switch_core_hash_destroy(&seen_pods);
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
 		"Headless Janus registry refresh: %d pod(s) from %s\n", endpoint_count, headless_host);

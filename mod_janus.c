@@ -732,7 +732,11 @@ static void stopServerThread(server_t *pServer) {
 		switch_clear_flag_locked(pServer, SFLAG_TERMINATING | SFLAG_ENABLED);
 	} else {
 		switch_mutex_unlock(pServer->flag_mutex);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s is already disabled\n", pServer->name);
+		if (switch_test_flag(pServer, SFLAG_EVICTED)) {
+			serversDynamicRemoveFromLookup(pServer);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Server=%s is already disabled\n", pServer->name);
+		}
 	}
 }
 
