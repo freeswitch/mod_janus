@@ -51,14 +51,15 @@ typedef struct {
   char guess_ip[80];
   switch_bool_t auto_nat;
 
-  /* Optional url-template: expand {pod} in pod-url-template at dial time. */
-  char *pod_url_template;
-  unsigned int pod_server_max;
-  unsigned int pod_server_idle_sec;
+  /* Headless Kubernetes service REST base (http://janus-headless.ns.svc:8088/janus). */
+  char *headless_service_url;
+  unsigned int registry_refresh_sec;
   unsigned int pod_server_fail_max;
   server_t *pod_defaults;
-  switch_thread_t *dynamic_sweep_thread;
-  switch_bool_t dynamic_sweep_terminating;
+  switch_thread_t *registry_thread;
+  switch_bool_t registry_terminating;
+  void (*start_server_thread)(server_t *pServer, switch_bool_t wait_for_active);
+  void (*stop_server_thread)(server_t *pServer);
 } globals_t;
 
 // define as a macro so we can eliminate one nested function

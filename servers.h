@@ -60,6 +60,7 @@ typedef struct server_s {
 	 * well as to the audiobridge join body so that per-room signed_tokens
 	 * enforcement (PR #3635) accepts them. */
 	char *pHmacSecret;
+	char *pod_ip;
 	switch_thread_t *pThread;
 
 	char *local_network;
@@ -99,7 +100,11 @@ switch_status_t serversList(const char *pLine, const char *pCursor, switch_conso
 switch_status_t serversAdd(switch_xml_t xmlint);
 switch_status_t serversCaptureDefaults(server_t *pServer);
 switch_bool_t serversPodNameValid(const char *pod_name);
-server_t *serversEnsureFromTemplate(const char *pod_name);
+void serversBindStartThread(void (*start_fn)(server_t *pServer, switch_bool_t wait_for_active));
+void serversBindStopThread(void (*stop_fn)(server_t *pServer));
+switch_status_t serversRegistryRefresh(void);
+void serversStartRegistry(void);
+void serversStopRegistry(void);
 void serversDynamicRecordActivity(server_t *pServer);
 void serversDynamicRecordConnectFailure(server_t *pServer);
 void serversDynamicResetConnectFailures(server_t *pServer);

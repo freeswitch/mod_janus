@@ -264,42 +264,16 @@ switch_bool_t serversPodNameValid(const char *pod_name) {
 	return SWITCH_TRUE;
 }
 
-static unsigned int serversDynamicCount(void) {
-	switch_hash_index_t *pIndex = NULL;
-	server_t *pServer;
-	unsigned int count = 0;
+#define REGISTRY_MAX_ENDPOINTS 64
 
-	while ((pServer = serversIterate(&pIndex)) != NULL) {
-		if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
-			count++;
-		}
-	}
-	return count;
+void serversBindStartThread(void (*start_fn)(server_t *pServer, switch_bool_t wait_for_active))
+{
+	globals.start_server_thread = start_fn;
 }
 
-static char *serversExpandPodUrl(const char *pod_name) {
-	char *expanded;
-	const char *placeholder = "{pod}";
-	const char *start, *match;
-	size_t prefix_len, pod_len, total;
-
-	switch_assert(globals.pod_url_template);
-
-	start = globals.pod_url_template;
-	match = strstr(start, placeholder);
-	if (!match) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-			"pod-url-template missing {pod} placeholder: %s\n", globals.pod_url_template);
-		return NULL;
-	}
-
-	prefix_len = (size_t) (match - start);
-	pod_len = strlen(pod_name);
-	total = prefix_len + pod_len + strlen(match + strlen(placeholder)) + 1;
-
-	expanded = switch_core_alloc(globals.pModulePool, total);
-	(void) snprintf(expanded, total, "%.*s%s%s", (int) prefix_len, start, pod_name, match + strlen(placeholder));
-	return expanded;
+void serversBindStopThread(void (*stop_fn)(server_t *pServer))
+{
+	globals.stop_server_thread = stop_fn;
 }
 
 static switch_bool_t serversParseHttpUrlParts(const char *url, char *host, size_t host_size, char *port, size_t port_size,
@@ -379,216 +353,52 @@ static switch_bool_t serversParseHttpUrlParts(const char *url, char *host, size_
 	return SWITCH_TRUE;
 }
 
-static switch_bool_t serversHostnameResolves(const char *hostname)
+static char *serversBuildJanusUrl(const char *ip, const char *port, const char *path)
 {
-	struct addrinfo hints, *res;
-	int rc;
-
-	if (zstr(hostname)) {
-		return SWITCH_FALSE;
-	}
-
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-
-	rc = getaddrinfo(hostname, NULL, &hints, &res);
-	if (rc != 0) {
-		return SWITCH_FALSE;
-	}
-
-	freeaddrinfo(res);
-	return SWITCH_TRUE;
-}
-
-static switch_bool_t serversExtractHeadlessFromTemplate(char *headless_host, size_t headless_host_size, char *port,
-	size_t port_size, char *path, size_t path_size)
-{
-	const char *marker = "{pod}.";
-	const char *start;
-	const char *end;
-
-	switch_assert(globals.pod_url_template);
-
-	start = strstr(globals.pod_url_template, marker);
-	if (!start) {
-		return SWITCH_FALSE;
-	}
-
-	start += strlen(marker);
-	end = strpbrk(start, ":/");
-	if (!end) {
-		return SWITCH_FALSE;
-	}
-
-	if ((size_t) (end - start) >= headless_host_size) {
-		return SWITCH_FALSE;
-	}
-
-	memcpy(headless_host, start, (size_t) (end - start));
-	headless_host[end - start] = '\0';
-
-	if (*end == ':') {
-		const char *port_start = end + 1;
-		const char *port_end = strchr(port_start, '/');
-		size_t port_len;
-
-		if (!port_end) {
-			port_end = port_start + strlen(port_start);
-		}
-
-		port_len = (size_t) (port_end - port_start);
-		if (port_len >= port_size) {
-			return SWITCH_FALSE;
-		}
-		memcpy(port, port_start, port_len);
-		port[port_len] = '\0';
-
-		if (path && path_size > 0) {
-			if (*port_end == '/') {
-				switch_copy_string(path, port_end, path_size);
-			} else {
-				path[0] = '\0';
-			}
-		}
-	} else if (path && path_size > 0) {
-		switch_copy_string(path, end, path_size);
-		if (port && port_size > 0) {
-			switch_copy_string(port, "8088", port_size);
-		}
-	}
-
-	return SWITCH_TRUE;
-}
-
-static char *serversDiscoverPodUrlViaHeadless(const char *pod_name)
-{
-	char headless_host[256];
-	char port[16];
-	char path[128];
-	struct addrinfo hints, *res, *rp;
-	char *resolved = NULL;
-
-	if (!serversExtractHeadlessFromTemplate(headless_host, sizeof(headless_host), port, sizeof(port), path,
-			sizeof(path))) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"pod-url-template missing {pod}. prefix; cannot probe headless endpoints\n");
-		return NULL;
-	}
+	char url[512];
 
 	if (zstr(path)) {
-		switch_copy_string(path, "/janus", sizeof(path));
+		path = "/janus";
 	}
 
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-
-	if (getaddrinfo(headless_host, NULL, &hints, &res) != 0) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"Headless service DNS lookup failed for %s\n", headless_host);
-		return NULL;
-	}
-
-	for (rp = res; rp && !resolved; rp = rp->ai_next) {
-		char ip[INET_ADDRSTRLEN];
-		char info_url[512];
-		char janus_url[512];
-		cJSON *json;
-		cJSON *server_name;
-
-		if (rp->ai_family != AF_INET) {
-			continue;
-		}
-
-		if (!inet_ntop(AF_INET, &((struct sockaddr_in *) rp->ai_addr)->sin_addr, ip, sizeof(ip))) {
-			continue;
-		}
-
-		(void) snprintf(info_url, sizeof(info_url), "http://%s:%s%s/info", ip, port, path);
-		json = httpGet(info_url, 2000);
-		if (!json) {
-			continue;
-		}
-
-		server_name = cJSON_GetObjectItemCaseSensitive(json, "server-name");
-		if (cJSON_IsString(server_name) && server_name->valuestring &&
-				!strcmp(server_name->valuestring, pod_name)) {
-			(void) snprintf(janus_url, sizeof(janus_url), "http://%s:%s%s", ip, port, path);
-			resolved = switch_core_strdup(globals.pModulePool, janus_url);
-		}
-
-		cJSON_Delete(json);
-	}
-
-	freeaddrinfo(res);
-
-	if (resolved) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-			"Resolved Janus pod=%s via headless endpoint discovery url=%s\n", pod_name, resolved);
-	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"No headless Janus endpoint matched pod=%s (service=%s)\n", pod_name, headless_host);
-	}
-
-	return resolved;
+	(void) snprintf(url, sizeof(url), "http://%s:%s%s", ip, port, path);
+	return switch_core_strdup(globals.pModulePool, url);
 }
 
-static char *serversResolvePodUrl(const char *pod_name)
+static switch_bool_t serversProbeJanusPodAtIp(const char *ip, const char *port, const char *path,
+	char *pod_name_out, size_t pod_name_size)
 {
-	char *expanded;
-	char host[256];
-	char port[16];
-	char path[128];
-	char *discovered;
+	char info_url[512];
+	cJSON *json;
+	cJSON *server_name;
+	switch_bool_t ok = SWITCH_FALSE;
 
-	expanded = serversExpandPodUrl(pod_name);
-	if (!expanded) {
-		return NULL;
+	(void) snprintf(info_url, sizeof(info_url), "http://%s:%s%s/info", ip, port, zstr(path) ? "/janus" : path);
+	json = httpGet(info_url, 2000);
+	if (!json) {
+		return SWITCH_FALSE;
 	}
 
-	if (serversParseHttpUrlParts(expanded, host, sizeof(host), port, sizeof(port), path, sizeof(path)) &&
-			serversHostnameResolves(host)) {
-		return expanded;
+	server_name = cJSON_GetObjectItemCaseSensitive(json, "server-name");
+	if (cJSON_IsString(server_name) && server_name->valuestring &&
+			serversPodNameValid(server_name->valuestring)) {
+		switch_copy_string(pod_name_out, server_name->valuestring, pod_name_size);
+		ok = SWITCH_TRUE;
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-		"Pod hostname DNS unavailable for %s; probing headless Janus endpoints\n", host);
-
-	discovered = serversDiscoverPodUrlViaHeadless(pod_name);
-	if (discovered) {
-		return discovered;
-	}
-
-	return expanded;
+	cJSON_Delete(json);
+	return ok;
 }
 
-server_t *serversEnsureFromTemplate(const char *pod_name) {
+typedef struct registry_endpoint_s {
+	char pod_name[64];
+	char pod_ip[INET_ADDRSTRLEN];
+	char *url;
+} registry_endpoint_t;
+
+static server_t *serversCreateRegistryServer(const char *pod_name, const char *pod_ip, const char *url)
+{
 	server_t *pServer;
-	char *pUrl;
-	unsigned int max_servers;
-
-	if (zstr(globals.pod_url_template) || !globals.pod_defaults) {
-		return NULL;
-	}
-
-	if (!serversPodNameValid(pod_name)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"Rejecting invalid server name=%s\n", pod_name);
-		return NULL;
-	}
-
-	max_servers = globals.pod_server_max ? globals.pod_server_max : 64;
-	if (serversDynamicCount() >= max_servers) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"Dynamic server limit reached (%u); cannot add server=%s\n", max_servers, pod_name);
-		return NULL;
-	}
-
-	pUrl = serversResolvePodUrl(pod_name);
-	if (!pUrl) {
-		return NULL;
-	}
 
 	pServer = switch_core_alloc(globals.pModulePool, sizeof(*pServer));
 	switch_mutex_init(&pServer->mutex, SWITCH_MUTEX_NESTED, globals.pModulePool);
@@ -604,17 +414,232 @@ server_t *serversEnsureFromTemplate(const char *pod_name) {
 	pServer->last_activity = switch_time_now();
 	pServer->connect_failures = 0;
 	pServer->name = switch_core_strdup(globals.pModulePool, pod_name);
-	pServer->pUrl = pUrl;
+	pServer->pUrl = switch_core_strdup(globals.pModulePool, url);
+	pServer->pod_ip = switch_core_strdup(globals.pModulePool, pod_ip);
 
 	serverCloneDefaults(pServer, globals.pod_defaults);
 	switch_set_flag(pServer, SFLAG_ENABLED);
 	switch_set_flag(pServer, SFLAG_DYNAMIC);
 
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-		"Created dynamic Janus server=%s url=%s\n", pod_name, pUrl);
-
 	switch_core_hash_insert(globals.pServerNameLookup, pServer->name, pServer);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+		"Registered headless Janus pod=%s ip=%s url=%s\n", pod_name, pod_ip, url);
+
+	if (globals.start_server_thread) {
+		globals.start_server_thread(pServer, SWITCH_TRUE);
+	}
+
 	return pServer;
+}
+
+static void serversUpdateRegistryServer(server_t *pServer, const char *pod_ip, const char *url)
+{
+	switch_bool_t url_changed = SWITCH_FALSE;
+
+	switch_mutex_lock(pServer->mutex);
+
+	if (!zstr(pod_ip) && (!pServer->pod_ip || strcmp(pServer->pod_ip, pod_ip))) {
+		pServer->pod_ip = switch_core_strdup(globals.pModulePool, pod_ip);
+	}
+
+	if (!zstr(url) && (!pServer->pUrl || strcmp(pServer->pUrl, url))) {
+		pServer->pUrl = switch_core_strdup(globals.pModulePool, url);
+		url_changed = SWITCH_TRUE;
+	}
+
+	pServer->last_activity = switch_time_now();
+	pServer->connect_failures = 0;
+	switch_mutex_unlock(pServer->mutex);
+
+	if (url_changed) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+			"Updated headless Janus pod=%s ip=%s url=%s\n", pServer->name, pod_ip, url);
+	}
+}
+
+switch_status_t serversRegistryRefresh(void)
+{
+	char headless_host[256];
+	char port[16];
+	char path[128];
+	struct addrinfo hints, *res, *rp;
+	registry_endpoint_t endpoints[REGISTRY_MAX_ENDPOINTS];
+	int endpoint_count = 0;
+	switch_hash_t *seen_pods = NULL;
+	switch_hash_index_t *pIndex = NULL;
+	server_t *pServer;
+	int i;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+	if (zstr(globals.headless_service_url) || !globals.pod_defaults) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (!serversParseHttpUrlParts(globals.headless_service_url, headless_host, sizeof(headless_host), port,
+			sizeof(port), path, sizeof(path))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+			"Invalid headless-service-url: %s\n", globals.headless_service_url);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (zstr(path)) {
+		switch_copy_string(path, "/janus", sizeof(path));
+	}
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+
+	if (getaddrinfo(headless_host, NULL, &hints, &res) != 0) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Headless service DNS lookup failed for %s\n", headless_host);
+		return SWITCH_STATUS_FALSE;
+	}
+
+	for (rp = res; rp && endpoint_count < REGISTRY_MAX_ENDPOINTS; rp = rp->ai_next) {
+		char ip[INET_ADDRSTRLEN];
+		char pod_name[64];
+		int j;
+		switch_bool_t duplicate = SWITCH_FALSE;
+
+		if (rp->ai_family != AF_INET) {
+			continue;
+		}
+
+		if (!inet_ntop(AF_INET, &((struct sockaddr_in *) rp->ai_addr)->sin_addr, ip, sizeof(ip))) {
+			continue;
+		}
+
+		if (!serversProbeJanusPodAtIp(ip, port, path, pod_name, sizeof(pod_name))) {
+			continue;
+		}
+
+		for (j = 0; j < endpoint_count; j++) {
+			if (!strcmp(endpoints[j].pod_name, pod_name)) {
+				duplicate = SWITCH_TRUE;
+				break;
+			}
+		}
+		if (duplicate) {
+			continue;
+		}
+
+		endpoints[endpoint_count].url = serversBuildJanusUrl(ip, port, path);
+		switch_copy_string(endpoints[endpoint_count].pod_name, pod_name, sizeof(endpoints[endpoint_count].pod_name));
+		switch_copy_string(endpoints[endpoint_count].pod_ip, ip, sizeof(endpoints[endpoint_count].pod_ip));
+		endpoint_count++;
+	}
+
+	freeaddrinfo(res);
+
+	switch_core_hash_init(&seen_pods);
+	switch_mutex_lock(globals.mutex);
+
+	for (i = 0; i < endpoint_count; i++) {
+		pServer = serversFind(endpoints[i].pod_name);
+		if (!pServer) {
+			(void) serversCreateRegistryServer(endpoints[i].pod_name, endpoints[i].pod_ip, endpoints[i].url);
+		} else if (switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+			serversUpdateRegistryServer(pServer, endpoints[i].pod_ip, endpoints[i].url);
+			if (!switch_test_flag(pServer, SFLAG_ENABLED) && globals.start_server_thread) {
+				globals.start_server_thread(pServer, SWITCH_TRUE);
+			}
+		}
+		switch_core_hash_insert(seen_pods, endpoints[i].pod_name, (void *) 1);
+	}
+
+	pIndex = NULL;
+	while ((pServer = serversIterate(&pIndex)) != NULL) {
+		if (!switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+			continue;
+		}
+
+		if (switch_core_hash_find(seen_pods, pServer->name)) {
+			continue;
+		}
+
+		switch_mutex_lock(pServer->mutex);
+		if (pServer->callsInProgress > 0) {
+			switch_mutex_unlock(pServer->mutex);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+				"Headless Janus pod=%s no longer in registry but has active calls; keeping server\n", pServer->name);
+			continue;
+		}
+		switch_mutex_unlock(pServer->mutex);
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+			"Removing headless Janus pod=%s from registry\n", pServer->name);
+		switch_set_flag(pServer, SFLAG_EVICTED);
+		if (globals.stop_server_thread) {
+			globals.stop_server_thread(pServer);
+		} else {
+			serversDynamicRemoveFromLookup(pServer);
+		}
+	}
+
+	switch_mutex_unlock(globals.mutex);
+	switch_core_hash_destroy(&seen_pods);
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+		"Headless Janus registry refresh: %d pod(s) from %s\n", endpoint_count, headless_host);
+
+	return status;
+}
+
+static void *SWITCH_THREAD_FUNC servers_registry_run(switch_thread_t *pThread, void *pObj)
+{
+	unsigned int refresh_usec;
+
+	(void) pThread;
+	(void) pObj;
+
+	refresh_usec = (globals.registry_refresh_sec ? globals.registry_refresh_sec : 30) * 1000000;
+
+	(void) serversRegistryRefresh();
+
+	while (!globals.registry_terminating) {
+		switch_yield(refresh_usec);
+		if (globals.registry_terminating || zstr(globals.headless_service_url)) {
+			break;
+		}
+		(void) serversRegistryRefresh();
+	}
+
+	return NULL;
+}
+
+void serversStartRegistry(void)
+{
+	switch_threadattr_t *pThreadAttr = NULL;
+
+	if (globals.registry_thread || zstr(globals.headless_service_url)) {
+		return;
+	}
+
+	globals.registry_terminating = SWITCH_FALSE;
+	switch_threadattr_create(&pThreadAttr, globals.pModulePool);
+	switch_threadattr_stacksize_set(pThreadAttr, SWITCH_THREAD_STACKSIZE);
+	switch_thread_create(&globals.registry_thread, pThreadAttr, servers_registry_run, NULL, globals.pModulePool);
+}
+
+void serversStopRegistry(void)
+{
+	switch_status_t status;
+	switch_status_t returnValue;
+
+	if (!globals.registry_thread) {
+		return;
+	}
+
+	globals.registry_terminating = SWITCH_TRUE;
+	status = switch_thread_join(&returnValue, globals.registry_thread);
+	globals.registry_thread = NULL;
+
+	if (status != SWITCH_STATUS_SUCCESS || returnValue != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Headless registry thread join status=%d return=%d\n", status, returnValue);
+	}
 }
 
 void serversDynamicRecordActivity(server_t *pServer)
@@ -650,9 +675,6 @@ switch_bool_t serversDynamicEvictable(server_t *pServer, switch_bool_t *pIdle, s
 	unsigned int calls;
 	unsigned int failures;
 	janus_id_t serverId;
-	switch_time_t last;
-	switch_time_t idle_usec;
-	switch_bool_t idle = SWITCH_FALSE;
 	switch_bool_t fail = SWITCH_FALSE;
 
 	switch_assert(pServer);
@@ -665,7 +687,6 @@ switch_bool_t serversDynamicEvictable(server_t *pServer, switch_bool_t *pIdle, s
 	calls = pServer->callsInProgress;
 	failures = pServer->connect_failures;
 	serverId = pServer->serverId;
-	last = pServer->last_activity;
 	switch_mutex_unlock(pServer->mutex);
 
 	if (calls > 0) {
@@ -676,21 +697,14 @@ switch_bool_t serversDynamicEvictable(server_t *pServer, switch_bool_t *pIdle, s
 		fail = SWITCH_TRUE;
 	}
 
-	if (globals.pod_server_idle_sec) {
-		idle_usec = (switch_time_t) globals.pod_server_idle_sec * 1000000;
-		if ((switch_time_now() - last) >= idle_usec) {
-			idle = SWITCH_TRUE;
-		}
-	}
-
 	if (pIdle) {
-		*pIdle = idle;
+		*pIdle = SWITCH_FALSE;
 	}
 	if (pFail) {
 		*pFail = fail;
 	}
 
-	return idle || fail ? SWITCH_TRUE : SWITCH_FALSE;
+	return fail ? SWITCH_TRUE : SWITCH_FALSE;
 }
 
 void serversDynamicRemoveFromLookup(server_t *pServer)
@@ -735,15 +749,21 @@ void serversDynamicRemoveFromLookup(server_t *pServer)
 switch_status_t serversSummary(switch_stream_handle_t *pStream) {
   switch_hash_index_t *pIndex = NULL;
 	server_t *pServer;
-  char text[128];
+  char text[512];
 
   switch_assert(globals.pServerNameLookup);
 
-  pStream->write_function(pStream, "name|enabled|totalCalls|callsInProgress|started|id\n");
+  pStream->write_function(pStream, "name|enabled|registry|pod_ip|url|totalCalls|callsInProgress|started|id\n");
   while ((pServer = serversIterate(&pIndex)) != NULL) {
     switch_mutex_lock(pServer->mutex);
-    (void) snprintf(text, sizeof(text), "%s|%s|%u|%u|%" SWITCH_INT64_T_FMT "|%" SWITCH_UINT64_T_FMT "\n", pServer->name,
-        switch_test_flag(pServer, SFLAG_ENABLED) ? "true" : "false", pServer->totalCalls,
+    (void) snprintf(text, sizeof(text),
+		"%s|%s|%s|%s|%s|%u|%u|%" SWITCH_INT64_T_FMT "|%" SWITCH_UINT64_T_FMT "\n",
+		pServer->name,
+        switch_test_flag(pServer, SFLAG_ENABLED) ? "true" : "false",
+		switch_test_flag(pServer, SFLAG_DYNAMIC) ? "true" : "false",
+		pServer->pod_ip ? pServer->pod_ip : "",
+		pServer->pUrl ? pServer->pUrl : "",
+		pServer->totalCalls,
         pServer->callsInProgress, pServer->started, pServer->serverId);
     switch_mutex_unlock(pServer->mutex);
 

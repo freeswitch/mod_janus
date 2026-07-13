@@ -736,101 +736,6 @@ static void stopServerThread(server_t *pServer) {
 	}
 }
 
-static void evict_dynamic_server(server_t *pServer, const char *reason)
-{
-	switch_bool_t idle = SWITCH_FALSE;
-	switch_bool_t fail = SWITCH_FALSE;
-
-	switch_assert(pServer);
-
-	if (!serversDynamicEvictable(pServer, &idle, &fail)) {
-		return;
-	}
-
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-		"Evicting dynamic server=%s (%s)\n", pServer->name, reason ? reason : "idle");
-
-	switch_set_flag(pServer, SFLAG_EVICTED);
-	stopServerThread(pServer);
-}
-
-static void *SWITCH_THREAD_FUNC dynamic_servers_sweep_run(switch_thread_t *pThread, void *pObj)
-{
-	(void) pThread;
-	(void) pObj;
-
-	while (!globals.dynamic_sweep_terminating) {
-		switch_hash_index_t *pIndex = NULL;
-		server_t *pServer;
-		switch_bool_t idle = SWITCH_FALSE;
-		switch_bool_t fail = SWITCH_FALSE;
-		const char *reason = NULL;
-
-		switch_yield(30000000);
-
-		if (globals.dynamic_sweep_terminating || zstr(globals.pod_url_template)) {
-			break;
-		}
-
-		while ((pServer = serversIterate(&pIndex)) != NULL) {
-			if (!switch_test_flag(pServer, SFLAG_DYNAMIC)) {
-				continue;
-			}
-
-			idle = SWITCH_FALSE;
-			fail = SWITCH_FALSE;
-			if (!serversDynamicEvictable(pServer, &idle, &fail)) {
-				continue;
-			}
-
-			if (fail) {
-				reason = "connect failures";
-			} else if (idle) {
-				reason = "idle timeout";
-			} else {
-				continue;
-			}
-
-			evict_dynamic_server(pServer, reason);
-		}
-	}
-
-	return NULL;
-}
-
-static void startDynamicServersSweep(void)
-{
-	switch_threadattr_t *pThreadAttr = NULL;
-
-	if (globals.dynamic_sweep_thread || zstr(globals.pod_url_template)) {
-		return;
-	}
-
-	globals.dynamic_sweep_terminating = SWITCH_FALSE;
-	switch_threadattr_create(&pThreadAttr, globals.pModulePool);
-	switch_threadattr_stacksize_set(pThreadAttr, SWITCH_THREAD_STACKSIZE);
-	switch_thread_create(&globals.dynamic_sweep_thread, pThreadAttr, dynamic_servers_sweep_run, NULL, globals.pModulePool);
-}
-
-static void stopDynamicServersSweep(void)
-{
-	switch_status_t status;
-	switch_status_t returnValue;
-
-	if (!globals.dynamic_sweep_thread) {
-		return;
-	}
-
-	globals.dynamic_sweep_terminating = SWITCH_TRUE;
-	status = switch_thread_join(&returnValue, globals.dynamic_sweep_thread);
-	globals.dynamic_sweep_thread = NULL;
-
-	if (status != SWITCH_STATUS_SUCCESS || returnValue != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-			"Dynamic server sweep thread join status=%d return=%d\n", status, returnValue);
-	}
-}
-
 // static switch_bool_t isVideoCall(switch_core_session_t *session) {
 // 	switch_channel_t *channel;
 
@@ -1358,16 +1263,9 @@ static server_t *resolveServerForDial(const char *pServerName, switch_core_sessi
 	server_t *pTmpServer;
 
 	pTmpServer = serversFind(pServerName);
-	if (!pTmpServer && !zstr(globals.pod_url_template)) {
-		switch_mutex_lock(globals.mutex);
+	if (!pTmpServer && !zstr(globals.headless_service_url)) {
+		(void) serversRegistryRefresh();
 		pTmpServer = serversFind(pServerName);
-		if (!pTmpServer) {
-			pTmpServer = serversEnsureFromTemplate(pServerName);
-			if (pTmpServer) {
-				startServerThread(pTmpServer, SWITCH_TRUE);
-			}
-		}
-		switch_mutex_unlock(globals.mutex);
 	}
 
 	if (!pTmpServer) {
@@ -1553,6 +1451,34 @@ switch_io_routines_t janus_io_routines = {
 	/*.receive_event */ channel_receive_event
 };
 
+static char *normalize_headless_service_url(switch_memory_pool_t *pool, const char *configured)
+{
+	const char *placeholder = "{pod}.";
+	const char *match;
+	size_t prefix_len;
+	size_t total;
+
+	if (zstr(configured)) {
+		return NULL;
+	}
+
+	match = strstr(configured, placeholder);
+	if (!match) {
+		return switch_core_strdup(pool, configured);
+	}
+
+	prefix_len = (size_t) (match - configured);
+	total = prefix_len + strlen(match + strlen(placeholder)) + 1;
+
+	{
+		char *normalized = switch_core_alloc(pool, total);
+		(void) snprintf(normalized, total, "%.*s%s", (int) prefix_len, configured, match + strlen(placeholder));
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+			"Deprecated pod-url-template converted to headless-service-url: %s\n", normalized);
+		return normalized;
+	}
+}
+
 static switch_status_t load_config(void)
 {
 	char *cf = "janus.conf";
@@ -1573,31 +1499,26 @@ static switch_status_t load_config(void)
 
 			if (!strcmp(pVarStr, "debug")) {
 				globals.debug = switch_true(pValStr);
-			} else if (!strcmp(pVarStr, "pod-url-template") && !zstr(pValStr)) {
-				globals.pod_url_template = switch_core_strdup(globals.pModulePool, pValStr);
-			} else if (!strcmp(pVarStr, "pod-server-max") && !zstr(pValStr)) {
-				globals.pod_server_max = (unsigned int) atoi(pValStr);
-			} else if (!strcmp(pVarStr, "pod-server-idle-sec") && !zstr(pValStr)) {
-				globals.pod_server_idle_sec = (unsigned int) atoi(pValStr);
+			} else if ((!strcmp(pVarStr, "headless-service-url") || !strcmp(pVarStr, "pod-url-template")) && !zstr(pValStr)) {
+				globals.headless_service_url = normalize_headless_service_url(globals.pModulePool, pValStr);
+			} else if (!strcmp(pVarStr, "registry-refresh-sec") && !zstr(pValStr)) {
+				globals.registry_refresh_sec = (unsigned int) atoi(pValStr);
 			} else if (!strcmp(pVarStr, "pod-server-fail-max") && !zstr(pValStr)) {
 				globals.pod_server_fail_max = (unsigned int) atoi(pValStr);
 			}
 		}
 	}
 
-	if (globals.pod_url_template) {
-		if (!globals.pod_server_max) {
-			globals.pod_server_max = 64;
-		}
-		if (!globals.pod_server_idle_sec) {
-			globals.pod_server_idle_sec = 600;
+	if (globals.headless_service_url) {
+		if (!globals.registry_refresh_sec) {
+			globals.registry_refresh_sec = 30;
 		}
 		if (!globals.pod_server_fail_max) {
 			globals.pod_server_fail_max = 12;
 		}
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-			"pod-url-template enabled (max dynamic servers=%u idle=%us fail=%u)\n",
-			globals.pod_server_max, globals.pod_server_idle_sec, globals.pod_server_fail_max);
+			"headless-service-url enabled url=%s refresh=%us fail_max=%u\n",
+			globals.headless_service_url, globals.registry_refresh_sec, globals.pod_server_fail_max);
 	}
 
 	xmlint = switch_xml_child(cfg, "server");
@@ -1665,13 +1586,16 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_janus_load)
 		return SWITCH_STATUS_FALSE;
 	}
 
+	serversBindStartThread(startServerThread);
+	serversBindStopThread(stopServerThread);
+
 	while ((pServer = serversIterate(&pIndex))) {
-		if (switch_test_flag(pServer, SFLAG_ENABLED)) {
+		if (switch_test_flag(pServer, SFLAG_ENABLED) && !switch_test_flag(pServer, SFLAG_DYNAMIC)) {
 			startServerThread(pServer, SWITCH_TRUE);
 		}
 	}
 
-	startDynamicServersSweep();
+	serversStartRegistry();
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Janus - Loaded\n");
 
@@ -1691,7 +1615,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_janus_shutdown)
 	switch_hash_index_t *pIndex = NULL;
   server_t *pServer;
 
-  stopDynamicServersSweep();
+  serversStopRegistry();
 
   while ((pServer = serversIterate(&pIndex)) != NULL) {
 		stopServerThread(pServer);

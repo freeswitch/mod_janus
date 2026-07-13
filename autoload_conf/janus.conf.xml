@@ -2,12 +2,12 @@
   <settings>
     <param name="debug" value="false"/>
     <!--
-      Optional dynamic servers: set pod-url-template with a {pod} placeholder.
-      Dial strings like janus/my-server/Agent@room create server entries on demand.
+      Optional headless-service registry: set headless-service-url to the
+      Kubernetes headless Service REST base (no {pod} placeholder).
+      mod_janus DNS-probes all pod IPs and registers server-name -> URL.
     -->
-    <!-- <param name="pod-url-template" value="http://{pod}.janus-1.example.com:8088/janus"/> -->
-    <!-- <param name="pod-server-max" value="64"/> -->
-    <!-- <param name="pod-server-idle-sec" value="600"/> -->
+    <!-- <param name="headless-service-url" value="http://janus-headless.example.svc.cluster.local:8088/janus"/> -->
+    <!-- <param name="registry-refresh-sec" value="30"/> -->
     <!-- <param name="pod-server-fail-max" value="12"/> -->
   </settings>
 
