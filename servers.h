@@ -94,6 +94,7 @@ typedef struct server_s {
 	switch_time_t ws_last_poll; /* WebSocket keepalive / activity timestamp */
 	switch_time_t last_activity; /* last use or successful Janus contact (dynamic servers) */
 	unsigned int connect_failures; /* consecutive REST connect/register failures */
+	switch_time_t last_verified; /* last /info pod-identity confirmation (dynamic servers) */
 } server_t;
 
 switch_status_t serversList(const char *pLine, const char *pCursor, switch_console_callback_match_t **matches);
@@ -103,6 +104,7 @@ switch_bool_t serversPodNameValid(const char *pod_name);
 void serversBindStartThread(void (*start_fn)(server_t *pServer, switch_bool_t wait_for_active));
 void serversBindStopThread(void (*stop_fn)(server_t *pServer));
 switch_status_t serversRegistryRefresh(void);
+switch_bool_t serversVerifyDynamicIdentity(server_t *pServer);
 void serversStartRegistry(void);
 void serversStopRegistry(void);
 void serversDynamicRecordActivity(server_t *pServer);

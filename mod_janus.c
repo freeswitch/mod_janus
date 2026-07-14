@@ -1277,6 +1277,25 @@ static server_t *resolveServerForDial(const char *pServerName, switch_core_sessi
 		return NULL;
 	}
 
+	/* Verify a cached pod->IP mapping before dialing; refresh and re-resolve on
+	   mismatch so IP reuse during Rollouts can't misroute the media leg. */
+	if (switch_test_flag(pTmpServer, SFLAG_DYNAMIC) && !serversVerifyDynamicIdentity(pTmpServer)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"Server=%s failed pod identity check; refreshing registry and re-resolving\n", pServerName);
+
+		if (!zstr(globals.headless_service_url)) {
+			(void) serversRegistryRefresh();
+			pTmpServer = serversFind(pServerName);
+		}
+
+		if (!pTmpServer ||
+				(switch_test_flag(pTmpServer, SFLAG_DYNAMIC) && !serversVerifyDynamicIdentity(pTmpServer))) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+				"Server=%s failed pod identity verification after refresh; refusing to dial wrong pod\n", pServerName);
+			return NULL;
+		}
+	}
+
 	DEBUG(SWITCH_CHANNEL_SESSION_LOG(session), "Found server=%s serverId=%" SWITCH_UINT64_T_FMT "\n",
 		pTmpServer->name, pTmpServer->serverId);
 

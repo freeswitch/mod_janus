@@ -266,6 +266,9 @@ switch_bool_t serversPodNameValid(const char *pod_name) {
 
 #define REGISTRY_MAX_ENDPOINTS 64
 
+/* Trust a pod-identity check for this long before re-probing on the next dial. */
+#define SERVER_VERIFY_TTL_US (5 * 1000000)
+
 void serversBindStartThread(void (*start_fn)(server_t *pServer, switch_bool_t wait_for_active))
 {
 	globals.start_server_thread = start_fn;
@@ -413,6 +416,7 @@ static server_t *serversCreateRegistryServer(const char *pod_name, const char *p
 	pServer->ws_last_poll = 0;
 	pServer->last_activity = switch_time_now();
 	pServer->connect_failures = 0;
+	pServer->last_verified = 0;
 	pServer->name = switch_core_strdup(globals.pModulePool, pod_name);
 	pServer->pUrl = switch_core_strdup(globals.pModulePool, url);
 	pServer->pod_ip = switch_core_strdup(globals.pModulePool, pod_ip);
@@ -446,6 +450,7 @@ static void serversUpdateRegistryServer(server_t *pServer, const char *pod_ip, c
 	if (!zstr(url) && (!pServer->pUrl || strcmp(pServer->pUrl, url))) {
 		pServer->pUrl = switch_core_strdup(globals.pModulePool, url);
 		url_changed = SWITCH_TRUE;
+		pServer->last_verified = 0; /* IP changed; re-verify on next dial */
 	}
 
 	pServer->last_activity = switch_time_now();
@@ -456,6 +461,61 @@ static void serversUpdateRegistryServer(server_t *pServer, const char *pod_ip, c
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 			"Updated headless Janus pod=%s ip=%s url=%s\n", pServer->name, pod_ip, url);
 	}
+}
+
+/* Confirm the pod answering at a dynamic server's cached IP still reports the
+ * expected server-name. Returns TRUE when trusted (static, recently verified,
+ * or freshly matched), FALSE when stale and the caller should refresh. */
+switch_bool_t serversVerifyDynamicIdentity(server_t *pServer)
+{
+	char url[512];
+	char pod_ip[INET_ADDRSTRLEN];
+	char host[256];
+	char port[16];
+	char path[128];
+	char pod_name[64] = "";
+	switch_time_t last_verified;
+
+	if (!pServer || !switch_test_flag(pServer, SFLAG_DYNAMIC)) {
+		return SWITCH_TRUE;
+	}
+
+	switch_mutex_lock(pServer->mutex);
+	last_verified = pServer->last_verified;
+	switch_copy_string(url, pServer->pUrl ? pServer->pUrl : "", sizeof(url));
+	switch_copy_string(pod_ip, pServer->pod_ip ? pServer->pod_ip : "", sizeof(pod_ip));
+	switch_mutex_unlock(pServer->mutex);
+
+	if (last_verified && (switch_time_now() - last_verified) < SERVER_VERIFY_TTL_US) {
+		return SWITCH_TRUE;
+	}
+
+	if (zstr(pod_ip) || !serversParseHttpUrlParts(url, host, sizeof(host), port, sizeof(port), path, sizeof(path))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"Cannot verify Janus pod=%s: missing ip/url (ip=%s url=%s)\n",
+			pServer->name, zstr(pod_ip) ? "<none>" : pod_ip, zstr(url) ? "<none>" : url);
+		return SWITCH_FALSE;
+	}
+
+	if (zstr(path)) {
+		switch_copy_string(path, "/janus", sizeof(path));
+	}
+
+	if (serversProbeJanusPodAtIp(pod_ip, port, path, pod_name, sizeof(pod_name)) &&
+			!strcmp(pod_name, pServer->name)) {
+		switch_mutex_lock(pServer->mutex);
+		pServer->last_verified = switch_time_now();
+		pServer->last_activity = pServer->last_verified;
+		pServer->connect_failures = 0;
+		switch_mutex_unlock(pServer->mutex);
+		return SWITCH_TRUE;
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+		"Janus pod=%s identity check failed at ip=%s (server-name=%s); mapping is stale\n",
+		pServer->name, pod_ip, zstr(pod_name) ? "<none>" : pod_name);
+
+	return SWITCH_FALSE;
 }
 
 switch_status_t serversRegistryRefresh(void)
