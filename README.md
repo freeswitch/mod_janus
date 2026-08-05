@@ -161,7 +161,6 @@ The following commands are available on the console API:
 ## Notes
 
 TODO: Use websocket rather than long-polling for connection to Janus
-TODO: I am not convinced that the shutdown is always successful
 
 ## Troubleshooting
 

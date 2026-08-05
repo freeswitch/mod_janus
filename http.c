@@ -39,13 +39,65 @@
 
 #define INITIAL_BODY_SIZE 1000
 
+typedef struct {
+	http_abort_fn_t fn;
+	void *data;
+} http_abort_ctx_t;
+
 static size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
   switch_buffer_t *pBuffer = (switch_buffer_t *) userdata;
   switch_buffer_write(pBuffer, ptr, size * nmemb);
   return nmemb;
 }
 
-cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonRequest)
+#if defined(LIBCURL_VERSION_NUM) && (LIBCURL_VERSION_NUM >= 0x072000)
+static int http_xferinfo(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+	curl_off_t ultotal, curl_off_t ulnow)
+{
+	http_abort_ctx_t *ctx = (http_abort_ctx_t *) clientp;
+	(void) dltotal;
+	(void) dlnow;
+	(void) ultotal;
+	(void) ulnow;
+	if (ctx && ctx->fn && ctx->fn(ctx->data) == SWITCH_TRUE) {
+		return 1;
+	}
+	return 0;
+}
+#else
+static int http_progress(void *clientp, double dltotal, double dlnow,
+	double ultotal, double ulnow)
+{
+	http_abort_ctx_t *ctx = (http_abort_ctx_t *) clientp;
+	(void) dltotal;
+	(void) dlnow;
+	(void) ultotal;
+	(void) ulnow;
+	if (ctx && ctx->fn && ctx->fn(ctx->data) == SWITCH_TRUE) {
+		return 1;
+	}
+	return 0;
+}
+#endif
+
+static void http_setopt_abort(switch_CURL *curl_handle, http_abort_ctx_t *ctx)
+{
+	if (!curl_handle || !ctx || !ctx->fn) {
+		return;
+	}
+	/* Progress ticks about once/sec even with no body bytes — enough to wake shutdown. */
+	switch_curl_easy_setopt(curl_handle, CURLOPT_NOPROGRESS, 0L);
+#if defined(LIBCURL_VERSION_NUM) && (LIBCURL_VERSION_NUM >= 0x072000)
+	switch_curl_easy_setopt(curl_handle, CURLOPT_XFERINFOFUNCTION, http_xferinfo);
+	switch_curl_easy_setopt(curl_handle, CURLOPT_XFERINFODATA, ctx);
+#else
+	switch_curl_easy_setopt(curl_handle, CURLOPT_PROGRESSFUNCTION, http_progress);
+	switch_curl_easy_setopt(curl_handle, CURLOPT_PROGRESSDATA, ctx);
+#endif
+}
+
+cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonRequest,
+	http_abort_fn_t abort_fn, void *abort_data)
 {
   cJSON *pJsonResponse = NULL;
   switch_CURL *curl_handle = NULL;
@@ -55,6 +107,7 @@ cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonReques
   char *pJsonStr = NULL;
   switch_buffer_t *pBody = NULL;
   const char *pBodyStr;
+  http_abort_ctx_t abort_ctx = { abort_fn, abort_data };
 
   switch_assert(pUrl);
 
@@ -80,6 +133,7 @@ cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonReques
     switch_curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT_MS, timeout);
     switch_curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 1);
   }
+  http_setopt_abort(curl_handle, &abort_ctx);
 
   DEBUG(SWITCH_CHANNEL_LOG, "HTTP POST url=%s json=%s\n", pUrl, pJsonStr);
 
@@ -95,6 +149,8 @@ cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonReques
     DEBUG(SWITCH_CHANNEL_LOG, "result=%s\n", pBodyStr);
 
     pJsonResponse = cJSON_Parse(pBodyStr);
+  } else if (curl_status == CURLE_ABORTED_BY_CALLBACK) {
+    DEBUG(SWITCH_CHANNEL_LOG, "HTTP POST aborted url=%s\n", pUrl);
   } else {
     // nothing downloaded or download interrupted
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Received curl error %d HTTP error code %ld trying to fetch %s\n", curl_status, httpRes, pUrl);
@@ -108,7 +164,8 @@ cJSON *httpPost(const char *pUrl, const unsigned int timeout, cJSON *pJsonReques
   return pJsonResponse;
 }
 
-cJSON *httpGet(const char *pUrl, const unsigned int timeout)
+cJSON *httpGet(const char *pUrl, const unsigned int timeout,
+	http_abort_fn_t abort_fn, void *abort_data)
 {
   cJSON *pJsonResponse = NULL;
   switch_CURL *curl_handle = NULL;
@@ -117,6 +174,7 @@ cJSON *httpGet(const char *pUrl, const unsigned int timeout)
   switch_curl_slist_t *headers = NULL;
   switch_buffer_t *pBody = NULL;
   const char *pBodyStr;
+  http_abort_ctx_t abort_ctx = { abort_fn, abort_data };
 
   switch_assert(pUrl);
 
@@ -139,6 +197,7 @@ cJSON *httpGet(const char *pUrl, const unsigned int timeout)
     switch_curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT_MS, timeout);
     switch_curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 1);
   }
+  http_setopt_abort(curl_handle, &abort_ctx);
 
   DEBUG(SWITCH_CHANNEL_LOG, "HTTP GET url=%s\n", pUrl);
 
@@ -154,6 +213,8 @@ cJSON *httpGet(const char *pUrl, const unsigned int timeout)
     DEBUG(SWITCH_CHANNEL_LOG, "code=%ld result=%s\n", httpRes, pBodyStr);
 
     pJsonResponse = cJSON_Parse(pBodyStr);
+  } else if (curl_status == CURLE_ABORTED_BY_CALLBACK) {
+    DEBUG(SWITCH_CHANNEL_LOG, "HTTP GET aborted url=%s\n", pUrl);
   } else {
     // nothing downloaded or download interrupted
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Received curl error %d HTTP error code %ld trying to fetch %s\n", curl_status, httpRes, pUrl);

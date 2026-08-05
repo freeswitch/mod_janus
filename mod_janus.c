@@ -539,9 +539,16 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 	while (!switch_test_flag(pServer, SFLAG_TERMINATING)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Server=%s invoking\n", pServer->name);
 
-		/* Back off before *re*connect attempts only. First pass must register immediately or outbound janus/... finds serverId=0. */
+		/* Back off before *re*connect attempts only. First pass must register immediately or outbound janus/... finds serverId=0.
+		 * Sleep in short slices so SFLAG_TERMINATING (module unload / server disable) is noticed promptly. */
 		if (outer_reconnect_delay) {
-			switch_yield(5000000);
+			int i;
+			for (i = 0; i < 50 && !switch_test_flag(pServer, SFLAG_TERMINATING); i++) {
+				switch_yield(100000);
+			}
+			if (switch_test_flag(pServer, SFLAG_TERMINATING)) {
+				break;
+			}
 		}
 		outer_reconnect_delay = 1;
 
@@ -650,6 +657,12 @@ static void *SWITCH_THREAD_FUNC server_thread_run(switch_thread_t *pThread, void
 				"Janus %s started (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 
 			if (apiPoll(pServer, serverId, joined, accepted, trickle, answer_on_webrtcup, answered, hungup, participant) != SWITCH_STATUS_SUCCESS) {
+				if (switch_test_flag(pServer, SFLAG_TERMINATING)) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+						"Janus %s aborted on shutdown (id=%" SWITCH_UINT64_T_FMT ")\n",
+						transport_name(pServer), (janus_id_t)serverId);
+					break;
+				}
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 					"Janus %s failed (id=%" SWITCH_UINT64_T_FMT ")\n", transport_name(pServer), (janus_id_t)serverId);
 				if (hashDelete(&globals.serverIdLookup, serverId) != SWITCH_STATUS_SUCCESS) {

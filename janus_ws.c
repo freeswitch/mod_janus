@@ -407,6 +407,9 @@ switch_status_t janus_ws_pump_once(server_t *server, janus_id_t session_id,
 			const switch_interval_time_t remain_us = deadline - switch_time_now();
 			uint32_t slice_ms;
 
+			if (switch_test_flag(server, SFLAG_TERMINATING)) {
+				return SWITCH_STATUS_FALSE;
+			}
 			if (remain_us <= 0) {
 				return SWITCH_STATUS_SUCCESS;
 			}

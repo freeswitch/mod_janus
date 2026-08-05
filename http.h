@@ -34,9 +34,15 @@
 #define _HTTP_H_
 
 #include  "cJSON.h"
+#include  "switch.h"
 
-cJSON *httpPost(const char *url, const unsigned int timeout, cJSON *pJsonRequest);
-cJSON *httpGet(const char *url, const unsigned int timeout);
+/* Return SWITCH_TRUE to abort an in-flight curl transfer (e.g. module shutdown). */
+typedef switch_bool_t (*http_abort_fn_t)(void *userdata);
+
+cJSON *httpPost(const char *url, const unsigned int timeout, cJSON *pJsonRequest,
+	http_abort_fn_t abort_fn, void *abort_data);
+cJSON *httpGet(const char *url, const unsigned int timeout,
+	http_abort_fn_t abort_fn, void *abort_data);
 
 #endif //_HTTP_H_
 /* For Emacs:

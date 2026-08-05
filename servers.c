@@ -377,7 +377,7 @@ static switch_bool_t serversProbeJanusPodAtIp(const char *ip, const char *port, 
 	switch_bool_t ok = SWITCH_FALSE;
 
 	(void) snprintf(info_url, sizeof(info_url), "http://%s:%s%s/info", ip, port, zstr(path) ? "/janus" : path);
-	json = httpGet(info_url, 2000);
+	json = httpGet(info_url, 2000, NULL, NULL);
 	if (!json) {
 		return SWITCH_FALSE;
 	}
@@ -668,7 +668,15 @@ static void *SWITCH_THREAD_FUNC servers_registry_run(switch_thread_t *pThread, v
 	(void) serversRegistryRefresh();
 
 	while (!globals.registry_terminating) {
-		switch_yield(refresh_usec);
+		/* Slice the refresh interval so shutdown can join this thread quickly. */
+		{
+			unsigned int slept = 0;
+			while (slept < refresh_usec && !globals.registry_terminating) {
+				const unsigned int slice = (refresh_usec - slept > 100000) ? 100000 : (refresh_usec - slept);
+				switch_yield(slice);
+				slept += slice;
+			}
+		}
 		if (globals.registry_terminating || zstr(globals.headless_service_url)) {
 			break;
 		}

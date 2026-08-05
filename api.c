@@ -394,7 +394,7 @@ static cJSON *api_send_request(server_t *pServer, cJSON *pJsonRequest, const cha
 			return NULL;
 		}
 		MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP %s - url=%s\n", label, url);
-		return httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest);
+		return httpPost(url, HTTP_POST_TIMEOUT, pJsonRequest, NULL, NULL);
 	}
 }
 
@@ -1480,6 +1480,12 @@ switch_status_t apiDetach(server_t *pServer, const janus_id_t serverId, const ja
   	return result;
 }
 
+static switch_bool_t http_abort_if_server_terminating(void *userdata)
+{
+	server_t *pServer = (server_t *) userdata;
+	return (pServer && switch_test_flag(pServer, SFLAG_TERMINATING)) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
 switch_status_t apiPoll(server_t *pServer, const janus_id_t serverId,
 	switch_status_t (*pJoinedFunc)(const janus_id_t serverId, const janus_id_t senderId, const janus_id_t roomId, const janus_id_t participantId),
 	switch_status_t (*pAcceptedFunc)(const janus_id_t serverId, const janus_id_t senderId, const char *pSdp),
@@ -1554,10 +1560,14 @@ switch_status_t apiPoll(server_t *pServer, const janus_id_t serverId,
 	}
 
 	MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Sending HTTP request - url=%s\n", url);
-	pJsonResponse = httpGet(url, HTTP_GET_TIMEOUT);
+	pJsonResponse = httpGet(url, HTTP_GET_TIMEOUT, http_abort_if_server_terminating, pServer);
 
 	if (pJsonResponse == NULL) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
+		if (switch_test_flag(pServer, SFLAG_TERMINATING)) {
+			MOD_JANUS_DBG(SWITCH_CHANNEL_LOG, "Poll aborted (server terminating)\n");
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Invalid response\n");
+		}
 		result = SWITCH_STATUS_FALSE;
 		goto done;
 	}
