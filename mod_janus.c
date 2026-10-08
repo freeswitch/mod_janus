@@ -96,6 +96,11 @@ struct private_object {
 	switch_bool_t answerRequested;
 	switch_bool_t answerDone;
 	switch_time_t answerDeadline;
+
+	/* Reads stay out of RTP until activate_rtp returns: activate_rtcp sets RTCP_MUX before rtcp_recv_msg_p. */
+	switch_bool_t rtpReady;
+	unsigned int rtpReaders;
+	switch_thread_cond_t *rtpCond;
 };
 typedef struct private_object private_t;
 
@@ -238,6 +243,48 @@ switch_status_t joined(janus_id_t serverId, janus_id_t senderId, janus_id_t room
 	return SWITCH_STATUS_SUCCESS;
 }
 
+static void rtp_read_quiesce(private_t *tech_pvt)
+{
+	switch_mutex_lock(tech_pvt->flag_mutex);
+	tech_pvt->rtpReady = SWITCH_FALSE;
+	while (tech_pvt->rtpReaders > 0) {
+		switch_thread_cond_wait(tech_pvt->rtpCond, tech_pvt->flag_mutex);
+	}
+	switch_mutex_unlock(tech_pvt->flag_mutex);
+}
+
+static void rtp_read_release(private_t *tech_pvt)
+{
+	switch_mutex_lock(tech_pvt->flag_mutex);
+	tech_pvt->rtpReady = SWITCH_TRUE;
+	switch_mutex_unlock(tech_pvt->flag_mutex);
+}
+
+static switch_bool_t rtp_read_enter(private_t *tech_pvt)
+{
+	switch_bool_t ready;
+
+	switch_mutex_lock(tech_pvt->flag_mutex);
+	ready = tech_pvt->rtpReady;
+	if (ready) {
+		tech_pvt->rtpReaders++;
+	}
+	switch_mutex_unlock(tech_pvt->flag_mutex);
+	return ready;
+}
+
+static void rtp_read_leave(private_t *tech_pvt)
+{
+	switch_mutex_lock(tech_pvt->flag_mutex);
+	if (tech_pvt->rtpReaders > 0) {
+		tech_pvt->rtpReaders--;
+	}
+	if (tech_pvt->rtpReaders == 0) {
+		switch_thread_cond_signal(tech_pvt->rtpCond);
+	}
+	switch_mutex_unlock(tech_pvt->flag_mutex);
+}
+
 // called when we have received the body of the SDP and all of the candidates
 switch_status_t proceed(switch_core_session_t *session) {
 	char sdp[4096] = "";
@@ -265,11 +312,13 @@ switch_status_t proceed(switch_core_session_t *session) {
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "ACCEPTED sdp=%s\n", sdp);
 
 	if (switch_core_media_negotiate_sdp(session, sdp, NULL, SDP_TYPE_RESPONSE)) {
+		rtp_read_quiesce(tech_pvt);
 		if (switch_core_media_activate_rtp(session) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "switch_core_media_activate_rtp error\n");
 			switch_channel_hangup(channel, SWITCH_CAUSE_NETWORK_OUT_OF_ORDER);
 			return SWITCH_STATUS_FALSE;
 		}
+		rtp_read_release(tech_pvt);
 	} else{
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Cannot negotiate SDP\n");
 		switch_channel_hangup(channel, SWITCH_CAUSE_MEDIA_TIMEOUT);
@@ -1175,22 +1224,30 @@ static switch_status_t channel_read_frame(switch_core_session_t *session, switch
 // 	*frame = &tech_pvt->read_frame;
 // 	return SWITCH_STATUS_SUCCESS;
 
-	{
-		/* Answer-gating fallback: answer once the deadline passes so a missing/failed browser cannot wedge the call. */
-		private_t *tech_pvt = switch_core_session_get_private(session);
-		if (tech_pvt && tech_pvt->answerGate && tech_pvt->answerRequested &&
-				!tech_pvt->answerDone && tech_pvt->answerDeadline &&
-				switch_time_now() >= tech_pvt->answerDeadline) {
-			switch_mutex_lock(tech_pvt->flag_mutex);
-			tech_pvt->remoteReady = SWITCH_TRUE;
-			switch_mutex_unlock(tech_pvt->flag_mutex);
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-				"Answer-gating timeout - answering without a confirmed remote participant\n");
-			(void) answered(tech_pvt->serverId, tech_pvt->senderId);
-		}
+	/* Answer-gating fallback: answer once the deadline passes so a missing/failed browser cannot wedge the call. */
+	private_t *tech_pvt = switch_core_session_get_private(session);
+	switch_status_t status;
+
+	if (tech_pvt && tech_pvt->answerGate && tech_pvt->answerRequested &&
+			!tech_pvt->answerDone && tech_pvt->answerDeadline &&
+			switch_time_now() >= tech_pvt->answerDeadline) {
+		switch_mutex_lock(tech_pvt->flag_mutex);
+		tech_pvt->remoteReady = SWITCH_TRUE;
+		switch_mutex_unlock(tech_pvt->flag_mutex);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+			"Answer-gating timeout - answering without a confirmed remote participant\n");
+		(void) answered(tech_pvt->serverId, tech_pvt->senderId);
 	}
 
-	return switch_core_media_read_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
+	if (tech_pvt && !rtp_read_enter(tech_pvt)) {
+		return SWITCH_STATUS_INUSE;
+	}
+
+	status = switch_core_media_read_frame(session, frame, flags, stream_id, SWITCH_MEDIA_TYPE_AUDIO);
+	if (tech_pvt) {
+		rtp_read_leave(tech_pvt);
+	}
+	return status;
 }
 
 static switch_status_t channel_write_frame(switch_core_session_t *session, switch_frame_t *frame, switch_io_flag_t flags, int stream_id)
@@ -1402,6 +1459,9 @@ static switch_call_cause_t channel_outgoing_channel(switch_core_session_t *sessi
 	tech_pvt->read_frame.buflen = sizeof(tech_pvt->databuf);
 	switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(*new_session));
 	switch_mutex_init(&tech_pvt->flag_mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(*new_session));
+	switch_thread_cond_create(&tech_pvt->rtpCond, switch_core_session_get_pool(*new_session));
+	tech_pvt->rtpReady = SWITCH_FALSE;
+	tech_pvt->rtpReaders = 0;
 	switch_core_session_set_private(*new_session, tech_pvt);
 
 	switch_media_handle_create(&tech_pvt->smh, *new_session, &tech_pvt->mparams);
